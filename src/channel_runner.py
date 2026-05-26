@@ -264,6 +264,31 @@ def _handle_download_failure(channel: Dict[str, Any], video: Dict[str, Any],
 
 # ── Upload ────────────────────────────────────────────────────────────────────
 
+def _resolve_title(channel: Dict[str, Any], video: Dict[str, Any]) -> str:
+    """
+    Return the best available title for a YouTube upload.
+    If the TikTok title is missing or too short (<5 chars), fall back to:
+        "{youtube_channel_name} — {Month DD, YYYY}"
+    where the date is the TikTok video's upload date (or today if unknown).
+    """
+    title = (video.get("title") or "").strip()
+    if len(title) >= 5:
+        return title
+    # Build fallback: channel name + video date
+    channel_name = channel.get("youtube_channel_name") or channel.get("id", "")
+    ts = video.get("timestamp")
+    if ts:
+        video_date = date.fromtimestamp(ts).strftime("%B %d, %Y")
+    else:
+        video_date = date.today().strftime("%B %d, %Y")
+    fallback = f"{channel_name} — {video_date}"
+    logger.info(
+        "[%s] No title for video %s — using fallback: '%s'",
+        channel["id"], video["id"], fallback,
+    )
+    return fallback
+
+
 def _upload_video(channel: Dict[str, Any], video: Dict[str, Any],
                   local_file: Path, is_short: bool, slot: int,
                   dry_run: bool) -> Optional[str]:
@@ -274,7 +299,7 @@ def _upload_video(channel: Dict[str, Any], video: Dict[str, Any],
     return upload_video(
         youtube_client=youtube,
         video_path=local_file,
-        title=video.get("title") or video["id"],
+        title=_resolve_title(channel, video),
         description=video.get("description") or "",
         tags=list(channel.get("default_tags") or []),
         category_id=str(channel.get("youtube_category_id", "22")),
