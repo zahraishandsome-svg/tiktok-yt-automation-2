@@ -30,7 +30,7 @@ _WATERMARK_FREE_FORMAT = (
     "bestvideo[format_id^=download][ext=mp4]+bestaudio"
     "/best[format_id^=download][ext=mp4]"
     "/best[format_id^=download]"
-    "/bestvideo[ext=mp4]+bestaudio"
+    "/best[ext=mp4]"
     "/best"
 )
 
