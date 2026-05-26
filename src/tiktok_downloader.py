@@ -5,6 +5,7 @@ Never raises — returns None on failure so channel_runner can decide retry logi
 """
 
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -56,6 +57,7 @@ def get_profile_videos(tiktok_username: str) -> Optional[List[Dict[str, Any]]]:
         "ignoreerrors": True,
         "skip_download": True,
     }
+    _inject_cookies(ydl_opts)
 
     logger.info("Fetching video list from TikTok: @%s", tiktok_username)
     info = None
@@ -126,6 +128,7 @@ def download_video(video_url: str, video_id: str, output_dir: Path) -> Optional[
         # Needed for some TikTok region restrictions
         "geo_bypass": True,
     }
+    _inject_cookies(ydl_opts)
 
     logger.info("Downloading TikTok video %s", video_id)
     try:
@@ -191,6 +194,14 @@ def cleanup_stale_downloads(output_dir: Path, max_age_days: int = 7) -> None:
             if modified < cutoff:
                 f.unlink()
                 logger.info("Purged stale download: %s", f.name)
+
+
+def _inject_cookies(ydl_opts: dict) -> None:
+    """Add cookiefile to yt-dlp opts if TIKTOK_COOKIES_FILE env var is set."""
+    cookies_file = os.environ.get("TIKTOK_COOKIES_FILE")
+    if cookies_file and Path(cookies_file).exists():
+        ydl_opts["cookiefile"] = cookies_file
+        logger.debug("Using TikTok cookies from %s", cookies_file)
 
 
 def _clean_title(title: str) -> str:

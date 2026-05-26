@@ -69,6 +69,13 @@ jobs:
             echo "DRY_RUN=false" >> .env
           fi
 
+      - name: Write TikTok cookies
+        run: |
+          if [ -n "${{ secrets.TIKTOK_COOKIES }}" ]; then
+            echo "${{ secrets.TIKTOK_COOKIES }}" | base64 -d > /tmp/tiktok_cookies.txt
+            echo "TIKTOK_COOKIES_FILE=/tmp/tiktok_cookies.txt" >> $GITHUB_ENV
+          fi
+
       - name: Run Slot 1
         run: |
           # Default to channel_4 only; override with manual dispatch input if set
