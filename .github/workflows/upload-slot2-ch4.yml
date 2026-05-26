@@ -2,8 +2,8 @@ name: Upload Slot 2 - Channel 4 (10 PM France)
 
 on:
   schedule:
-    # Upload at 18:00 UTC — video scheduled to go Public at 20:00 UTC (10 PM CEST / France)
-    - cron: "0 18 * * *"
+    # Upload at 16:00 UTC — video scheduled to go Public at 18:00 UTC (8 PM CEST / France)
+    - cron: "0 16 * * *"
   # Allow manual trigger from GitHub UI for testing
   workflow_dispatch:
     inputs:
