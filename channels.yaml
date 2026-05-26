@@ -40,5 +40,5 @@ channels:
     max_retry_days: 7
     shorts_max_seconds: 180
     slot_publish_times_utc:
-      1: "16:00"   # 6 PM CEST  (UTC+2, France) — peak Shorts window
-      2: "18:00"   # 8 PM CEST  (UTC+2, France) — peak Shorts window
+      1: "16:00"   # PUBLIC at 6 PM CEST (UTC+2, France) — uploaded to YT servers 2h earlier at 14:00 UTC
+      2: "18:00"   # PUBLIC at 8 PM CEST (UTC+2, France) — uploaded to YT servers 2h earlier at 16:00 UTC
