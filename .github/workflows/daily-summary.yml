@@ -1,0 +1,73 @@
+name: Daily Summary (12 AM PKT)
+
+on:
+  schedule:
+    # 19:00 UTC = 00:00 PKT next day (Pakistan Standard Time = UTC+5)
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: yt-uploads
+  cancel-in-progress: false
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore DB cache
+        uses: actions/cache@v4
+        with:
+          path: data/automation.db
+          key: automation-db-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            automation-db-${{ github.sha }}-
+            automation-db-
+
+      - name: Restore credentials & tokens
+        run: |
+          mkdir -p credentials tokens
+          if [ -n "${{ secrets.CHANNEL_4_CLIENT_SECRET }}" ]; then
+            echo "${{ secrets.CHANNEL_4_CLIENT_SECRET }}" | base64 -d > credentials/channel_4_client_secret.json
+          fi
+          if [ -n "${{ secrets.CHANNEL_4_TOKEN }}" ]; then
+            echo "${{ secrets.CHANNEL_4_TOKEN }}" | base64 -d > tokens/channel_4_token.json
+          fi
+
+      - name: Write .env
+        run: |
+          echo "DISCORD_WEBHOOK_URL=${{ secrets.DISCORD_WEBHOOK_URL }}" >> .env
+          echo "LOG_LEVEL=INFO" >> .env
+
+      - name: Send daily summary
+        run: python run.py --summary-only
+
+      - name: Save DB cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/automation.db
+          key: automation-db-${{ github.run_id }}
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-daily-summary-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
