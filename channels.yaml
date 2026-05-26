@@ -1,0 +1,44 @@
+# TikTok → YouTube Channel Pairs
+# ────────────────────────────────────────────────────────────────────────────
+# Adding a new channel = add an entry here + run: python onboard_channel.py
+# No code changes needed.
+#
+# Field reference:
+#   id                    Unique string ID. Used in DB, logs, and CLI flags.
+#   tiktok_username       TikTok @handle WITHOUT the @ symbol.
+#   youtube_channel_name  Display name (for logging only, not used in API calls).
+#   google_credentials_file  Path to client_secret.json from Google Cloud Console.
+#   oauth_token_file      Path to saved OAuth token (auto-created on first auth).
+#   videos_per_day        How many videos to upload per day (2 = 2 slots/day).
+#   description_footer    Text appended to every video description. Can be empty.
+#   default_tags          Tags added to every upload for this channel.
+#   youtube_category_id   YouTube category: 22=People & Blogs, 26=How-to & Style.
+#   enabled               Set to false to pause a channel without removing it.
+#   max_retry_days        Days to retry a failed download before giving up.
+#   shorts_max_seconds    Videos <= this duration (and vertical) upload as Shorts.
+#   min_upload_date       Optional YYYY-MM-DD. Ignore TikTok videos older than this date.
+#                         Useful for monetised channels that should only post recent content.
+#   min_backlog_for_slot1 Optional int. Slot 1 is skipped unless this many unuploaded
+#                         eligible videos exist. Use with min_upload_date to drop to 1/day
+#                         automatically once the backlog runs out.
+# ────────────────────────────────────────────────────────────────────────────
+
+channels:
+  - id: channel_4
+    tiktok_username: "aiivannaa"
+    youtube_channel_name: "aiivannaa"
+    google_credentials_file: "credentials/channel_4_client_secret.json"
+    oauth_token_file: "tokens/channel_4_token.json"
+    videos_per_day: 2
+    description_footer: ""
+    default_tags:
+      - aiivannaa
+      - viral
+      - trending
+    youtube_category_id: "22"
+    enabled: true
+    max_retry_days: 7
+    shorts_max_seconds: 180
+    slot_publish_times_utc:
+      1: "15:00"   # 8 PM PKT  (UTC+5)
+      2: "17:00"   # 10 PM PKT (UTC+5)

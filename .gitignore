@@ -1,0 +1,34 @@
+# Secrets — NEVER commit these
+.env
+credentials/*.json
+tokens/*.json
+
+# Downloaded videos — large files, DB is the source of truth
+downloads/
+
+# Database — committed to repo as starting point, kept fresh via Actions cache
+# data/automation.db is tracked so GitHub Actions has a seed on first run
+
+# Logs — per-machine output
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp

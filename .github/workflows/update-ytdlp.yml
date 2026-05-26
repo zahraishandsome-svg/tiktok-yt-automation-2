@@ -1,0 +1,82 @@
+name: Auto-update yt-dlp
+
+on:
+  schedule:
+    # Every day at 6:00 AM UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Get latest yt-dlp version
+        id: latest
+        run: |
+          LATEST=$(pip index versions yt-dlp 2>/dev/null | grep -oP '(?<=Available versions: )[\d.]+' | head -1)
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest yt-dlp: $LATEST"
+
+      - name: Get current pinned version
+        id: current
+        run: |
+          CURRENT=$(grep '^yt-dlp' requirements.txt | grep -oP '[\d.]+$')
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current yt-dlp: $CURRENT"
+
+      - name: Update requirements.txt if newer version available
+        id: update
+        run: |
+          LATEST="${{ steps.latest.outputs.version }}"
+          CURRENT="${{ steps.current.outputs.version }}"
+          # Alert and fail if version check itself returned empty (PyPI down, regex changed, etc.)
+          if [ -z "$LATEST" ]; then
+            curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d '{"content": "⚠️ **yt-dlp auto-update check FAILED** — could not determine latest version from PyPI. Manual check needed."}'
+            echo "LATEST is empty — version check failed"
+            exit 1
+          fi
+          if [ "$LATEST" != "$CURRENT" ]; then
+            sed -i "s/^yt-dlp>=.*/yt-dlp>=${LATEST}/" requirements.txt
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "Updated yt-dlp from $CURRENT to $LATEST"
+          else
+            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "Already up to date: $CURRENT"
+          fi
+
+      - name: Commit and push
+        if: steps.update.outputs.updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add requirements.txt
+          git commit -m "chore: bump yt-dlp to ${{ steps.latest.outputs.version }}"
+          git push
+
+      - name: Notify Discord — updated
+        if: steps.update.outputs.updated == 'true'
+        run: |
+          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"✅ **yt-dlp auto-updated** → \`${{ steps.latest.outputs.version }}\` (was \`${{ steps.current.outputs.version }}\`). New version will be used on next upload run.\"}"
+
+      - name: Notify Discord — already up to date
+        if: steps.update.outputs.updated == 'false'
+        run: |
+          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"ℹ️ **yt-dlp check** — already on latest (\`${{ steps.current.outputs.version }}\`). No update needed.\"}"
