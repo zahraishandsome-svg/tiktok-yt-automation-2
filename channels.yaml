@@ -40,5 +40,5 @@ channels:
     max_retry_days: 7
     shorts_max_seconds: 180
     slot_publish_times_utc:
-      1: "15:00"   # 8 PM PKT  (UTC+5)
-      2: "17:00"   # 10 PM PKT (UTC+5)
+      1: "18:00"   # 8 PM CEST  (UTC+2, France)
+      2: "20:00"   # 10 PM CEST (UTC+2, France)
