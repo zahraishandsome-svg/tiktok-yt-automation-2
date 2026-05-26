@@ -17,8 +17,21 @@ logger = logging.getLogger(__name__)
 # Format selector that prefers the non-watermarked download URL.
 # TikTok exposes two copies: play_addr (watermarked) and download_addr (clean).
 # yt-dlp's TikTok extractor labels the clean one; we filter by format_id prefix.
+#
+# Priority order:
+#   1. Watermark-free video-only + separate audio (ideal, merges via ffmpeg)
+#   2. Watermark-free combined mp4 (audio+video in one — used when no separate audio stream)
+#   3. Any watermark-free combined format (non-mp4 fallback)
+#   4. Best mp4 video + audio (no watermark filter — last resort before giving up on quality)
+#   5. Absolute fallback — whatever yt-dlp finds
+# Without options 2+3, bestvideo alone downloads silent video when TikTok
+# doesn't expose a separate audio stream for that format.
 _WATERMARK_FREE_FORMAT = (
-    "bestvideo[format_id^=download][ext=mp4]+bestaudio/bestvideo[ext=mp4]+bestaudio/best"
+    "bestvideo[format_id^=download][ext=mp4]+bestaudio"
+    "/best[format_id^=download][ext=mp4]"
+    "/best[format_id^=download]"
+    "/bestvideo[ext=mp4]+bestaudio"
+    "/best"
 )
 
 
