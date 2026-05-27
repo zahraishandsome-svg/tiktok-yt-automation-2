@@ -313,11 +313,15 @@ def _upload_video(channel: Dict[str, Any], video: Dict[str, Any],
 def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
     """
     Calculate the UTC publish time for this slot using slot_publish_times_utc config.
-    Returns an ISO 8601 UTC string (e.g. '2026-05-26T15:00:00Z') when the target
-    time is more than 15 minutes in the future — video uploads as Private and
-    YouTube makes it Public at exactly that time, regardless of when GitHub ran.
-    Returns None if no publish time is configured or the target is already past
-    (falls back to immediate Public upload).
+    Returns an ISO 8601 UTC string (e.g. '2026-05-26T15:00:00Z').
+    Video uploads as Private and YouTube makes it Public at exactly that time,
+    regardless of when GitHub Actions actually ran the workflow.
+
+    GitHub Actions cron delays can be anywhere from minutes to 10+ hours.
+    To handle this gracefully:
+      - If target time is still in the future: schedule for today
+      - If target time already passed today: schedule for TOMORROW at the same time
+        (never publish immediately — always respect the configured schedule)
     """
     times = channel.get("slot_publish_times_utc") or {}
     # Accept both int and string keys from YAML
@@ -335,19 +339,24 @@ def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
     target = now.replace(hour=h, minute=m, second=0, microsecond=0)
     delta_seconds = (target - now).total_seconds()
 
-    if delta_seconds < 900:   # less than 15 min away or already past
+    if delta_seconds < 0:
+        # Target already passed today (GitHub ran the cron late) — push to tomorrow.
+        # This ensures the video always goes public at the right time of day even
+        # when GitHub Actions delays the workflow by hours.
+        target = target + timedelta(days=1)
+        delta_seconds = (target - now).total_seconds()
         logger.info(
-            "[%s] Slot %d target publish time %02d:%02dZ is past or too close "
-            "(%.0f s) — publishing immediately",
-            channel["id"], slot, h, m, delta_seconds,
+            "[%s] Slot %d: %02d:%02dZ already passed today (GitHub cron ran late) — "
+            "scheduling for tomorrow: %s",
+            channel["id"], slot, h, m, target.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
-        return None
+    else:
+        logger.info(
+            "[%s] Slot %d will publish at %s (%d min from now)",
+            channel["id"], slot, target.strftime("%Y-%m-%dT%H:%M:%SZ"), int(delta_seconds / 60),
+        )
 
     publish_at = target.strftime("%Y-%m-%dT%H:%M:%SZ")
-    logger.info(
-        "[%s] Slot %d will publish at %s (%d min from now)",
-        channel["id"], slot, publish_at, int(delta_seconds / 60),
-    )
     return publish_at
 
 
