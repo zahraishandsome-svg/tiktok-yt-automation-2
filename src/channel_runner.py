@@ -340,22 +340,19 @@ def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
     delta_seconds = (target - now).total_seconds()
 
     if delta_seconds < 0:
-        # Target already passed today (GitHub ran the cron late) — push to tomorrow.
-        # This ensures the video always goes public at the right time of day even
-        # when GitHub Actions delays the workflow by hours.
-        target = target + timedelta(days=1)
-        delta_seconds = (target - now).total_seconds()
+        # Target already passed today (GitHub cron ran late) — publish immediately.
+        # Missing a day entirely is worse than publishing at the wrong time.
         logger.info(
-            "[%s] Slot %d: %02d:%02dZ already passed today (GitHub cron ran late) — "
-            "scheduling for tomorrow: %s",
-            channel["id"], slot, h, m, target.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "[%s] Slot %d: %02d:%02dZ already passed today (GitHub cron delay) — "
+            "publishing immediately",
+            channel["id"], slot, h, m,
         )
-    else:
-        logger.info(
-            "[%s] Slot %d will publish at %s (%d min from now)",
-            channel["id"], slot, target.strftime("%Y-%m-%dT%H:%M:%SZ"), int(delta_seconds / 60),
-        )
+        return None
 
+    logger.info(
+        "[%s] Slot %d will publish at %s (%d min from now)",
+        channel["id"], slot, target.strftime("%Y-%m-%dT%H:%M:%SZ"), int(delta_seconds / 60),
+    )
     publish_at = target.strftime("%Y-%m-%dT%H:%M:%SZ")
     return publish_at
 
