@@ -37,8 +37,6 @@ jobs:
           key: automation-db-channel_4-${{ github.sha }}-${{ github.run_id }}
           restore-keys: |
             automation-db-channel_4-${{ github.sha }}-
-            automation-db-channel_4-
-
       - name: Restore credentials & tokens
         run: |
           mkdir -p credentials tokens
