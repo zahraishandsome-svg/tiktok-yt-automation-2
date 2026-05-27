@@ -100,6 +100,7 @@ jobs:
             exit 0
           fi
           cp data/automation.db /tmp/automation_new.db
+          git checkout -- data/automation.db
           git fetch origin main
           git checkout -B main origin/main
           cp /tmp/automation_new.db data/automation.db
