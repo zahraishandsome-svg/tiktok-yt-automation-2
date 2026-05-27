@@ -11,13 +11,24 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+import os
+import glob as _glob
+
 PROJECT_ROOT = Path(__file__).parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "automation.db"
+
+def _get_db_path() -> Path:
+    page_id = os.environ.get("DB_PAGE_ID")
+    if page_id:
+        return PROJECT_ROOT / "data" / f"{page_id}.db"
+    return PROJECT_ROOT / "data" / "automation.db"
+
+DB_PATH = _get_db_path()
 
 
 def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    db_path = _get_db_path()
+    db_path.parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")   # safe for concurrent readers
     conn.execute("PRAGMA foreign_keys=ON")
@@ -75,7 +86,7 @@ def init_db() -> None:
                 ON runs (channel_id, run_date);
         """)
     conn.close()
-    logger.debug("Database initialised at %s", DB_PATH)
+    logger.debug("Database initialised at %s", _get_db_path())
 
 
 # ── Channel registry ──────────────────────────────────────────────────────────
@@ -250,9 +261,19 @@ def get_todays_run_summary() -> List[Dict]:
       2. Per-slot video URL — the subquery now matches posted_at to the
          specific run's started_at/completed_at window so slot 1 and slot 2
          never share the same video URL in the summary.
+
+    In summary mode (DB_PAGE_ID not set), globs all channel_*.db files and
+    combines results from each.
     """
-    conn = get_connection()
-    rows = conn.execute("""
+    page_id = os.environ.get("DB_PAGE_ID")
+    if page_id:
+        db_paths = [_get_db_path()]
+    else:
+        db_paths = [Path(p) for p in _glob.glob(str(PROJECT_ROOT / "data" / "channel_*.db"))]
+        if not db_paths:
+            db_paths = [PROJECT_ROOT / "data" / "automation.db"]
+
+    query = """
         SELECT r.channel_id, r.slot, r.status, r.videos_uploaded, r.error_message,
                (
                    SELECT p.youtube_video_id
@@ -287,9 +308,18 @@ def get_todays_run_summary() -> List[Dict]:
                 AND r2.status != 'running'
           )
         ORDER BY r.channel_id, r.slot
-    """).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    """
+
+    all_rows: List[Dict] = []
+    for db_path in db_paths:
+        if not db_path.exists():
+            continue
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query).fetchall()
+        conn.close()
+        all_rows.extend([dict(row) for row in rows])
+    return all_rows
 
 
 def slot_already_ran(channel_id: str, slot: int) -> bool:
