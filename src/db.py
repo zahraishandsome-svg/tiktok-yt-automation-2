@@ -301,11 +301,14 @@ def get_todays_run_summary() -> List[Dict]:
         WHERE r.run_date = date('now')
           AND r.status != 'running'
           AND r.id = (
-              SELECT MAX(r2.id) FROM runs r2
-              WHERE r2.channel_id = r.channel_id
-                AND r2.slot = r.slot
-                AND r2.run_date = r.run_date
-                AND r2.status != 'running'
+              SELECT COALESCE(
+                  (SELECT MAX(r2.id) FROM runs r2
+                   WHERE r2.channel_id = r.channel_id AND r2.slot = r.slot
+                     AND r2.run_date = r.run_date AND r2.status = 'success'),
+                  (SELECT MAX(r2.id) FROM runs r2
+                   WHERE r2.channel_id = r.channel_id AND r2.slot = r.slot
+                     AND r2.run_date = r.run_date AND r2.status != 'running')
+              )
           )
         ORDER BY r.channel_id, r.slot
     """
