@@ -105,7 +105,20 @@ jobs:
           git add -f data/channel_4.db
           if ! git diff --staged --quiet; then
             git commit -m "chore: update channel_4.db [skip ci]"
-            git push origin main
+            for i in 1 2 3; do
+              git push origin main && break
+              echo "Push failed (attempt $i/3) -- re-basing DB onto latest origin..."
+              cp data/channel_4.db /tmp/channel_4_retry.db
+              git fetch origin main
+              git checkout -B main origin/main
+              cp /tmp/channel_4_retry.db data/channel_4.db
+              git add -f data/channel_4.db
+              if git diff --staged --quiet; then
+                echo "DB already up to date on origin -- nothing to push"
+                break
+              fi
+              git commit -m "chore: update channel_4.db [skip ci]"
+            done
           else
             echo "No DB changes to commit"
           fi
