@@ -16,6 +16,12 @@ on:
         required: false
         default: "false"
 
+# Serialize all uploads for this channel — slot 2 queues behind slot 1 so they
+# never run simultaneously, preventing both slots from picking the same video.
+concurrency:
+  group: upload-channel_4
+  cancel-in-progress: false
+
 env:
   DB_PAGE_ID: channel_4
 
