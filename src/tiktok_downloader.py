@@ -15,22 +15,35 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-# Format selector that prefers the non-watermarked download URL.
-# TikTok exposes two copies: play_addr (watermarked) and download_addr (clean).
-# yt-dlp's TikTok extractor labels the clean one; we filter by format_id prefix.
+# Format selector that picks the clean (non-watermarked) stream.
+#
+# yt-dlp TikTok extractor exposes two format families:
+#   format_id^=play     → play_addr / play_addr_h264 / play_addr_bytevc1 / play
+#                          These are the raw stream URLs — NO watermark.
+#   format_id^=download → download_addr / download
+#                          These are TikTok's "Save Video" URLs — explicitly
+#                          labeled 'watermarked' in yt-dlp and given preference: -2.
+#
+# Root cause of historical watermark bug: the old selector used format_id^=download
+# which yt-dlp EXPLICITLY marks as watermarked (format_note='watermarked', pref=-2).
+# Japanese channels were unaffected because their creators have TikTok downloads
+# disabled → no 'download' format exists for them → selector fell through to
+# best[ext=mp4] → picked 'play' (clean). Western creators (Raven, Aivanna) have
+# downloads enabled → 'download' format was found first → watermarked.
+#
+# Fix: always prefer format_id^=play. Falls back to best[ext=mp4] (which also
+# picks play over download due to play's higher preference score).
 #
 # Priority order:
-#   1. Watermark-free video-only + separate audio (ideal, merges via ffmpeg)
-#   2. Watermark-free combined mp4 (audio+video in one — used when no separate audio stream)
-#   3. Any watermark-free combined format (non-mp4 fallback)
-#   4. Best mp4 video + audio (no watermark filter — last resort before giving up on quality)
-#   5. Absolute fallback — whatever yt-dlp finds
-# Without options 2+3, bestvideo alone downloads silent video when TikTok
-# doesn't expose a separate audio stream for that format.
+#   1. Clean video-only + separate audio (ideal, merges via ffmpeg)
+#   2. Clean combined mp4 (audio+video — used when no separate audio stream)
+#   3. Any clean combined format (non-mp4 fallback)
+#   4. Best mp4 (no explicit filter — play still wins via preference score)
+#   5. Absolute fallback
 _WATERMARK_FREE_FORMAT = (
-    "bestvideo[format_id^=download][ext=mp4]+bestaudio"
-    "/best[format_id^=download][ext=mp4]"
-    "/best[format_id^=download]"
+    "bestvideo[format_id^=play][ext=mp4]+bestaudio"
+    "/best[format_id^=play][ext=mp4]"
+    "/best[format_id^=play]"
     "/best[ext=mp4]"
     "/best"
 )
