@@ -59,6 +59,7 @@ def init_db() -> None:
                 posted_at           TEXT,
                 status              TEXT DEFAULT 'pending',
                     -- pending | uploaded | pending_retry | failed_permanent | skipped
+                    -- | deleted_repost_pending (uploaded to YT, YT video deleted, eligible for re-upload)
                 retry_count         INTEGER DEFAULT 0,
                 next_retry_date     TEXT,      -- ISO date, NULL if not in retry
                 error_message       TEXT,
@@ -174,6 +175,47 @@ def mark_uploaded(channel_id: str, tiktok_video_id: str, youtube_video_id: str) 
             tiktok_video_id,
         ))
     conn.close()
+
+
+def mark_deleted_repost_pending(channel_id: str, tiktok_video_id: str) -> None:
+    """
+    Mark a video whose YouTube copy was deleted as pending re-upload.
+    The video will be re-selected by _pick_next_video() on the next run
+    because get_posted_video_ids() does not include 'deleted_repost_pending'.
+    Clears the youtube_video_id so the old (deleted) ID is not confused with
+    any future upload.
+    """
+    conn = get_connection()
+    with conn:
+        conn.execute("""
+            UPDATE posted_videos
+            SET status = 'deleted_repost_pending',
+                youtube_video_id = NULL,
+                posted_at = NULL,
+                error_message = 'YouTube video deleted — repost pending',
+                updated_at = ?
+            WHERE channel_id = ? AND tiktok_video_id = ?
+        """, (datetime.utcnow().isoformat(), channel_id, tiktok_video_id))
+    conn.close()
+
+
+def delete_todays_success_runs(channel_id: str) -> int:
+    """
+    Remove today's success run records for a channel so slot_already_ran()
+    returns False and the workflow can re-run today.
+    Returns the number of records deleted.
+    Used after clearing watermarked videos to force a fresh clean upload today.
+    """
+    conn = get_connection()
+    with conn:
+        cur = conn.execute("""
+            DELETE FROM runs
+            WHERE channel_id = ? AND run_date = ? AND status = 'success'
+        """, (channel_id, date.today().isoformat()))
+        deleted = cur.rowcount
+    conn.close()
+    logger.info("Deleted %d success run record(s) for %s today", deleted, channel_id)
+    return deleted
 
 
 def mark_retry(channel_id: str, tiktok_video_id: str,
