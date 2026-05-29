@@ -51,9 +51,11 @@ _WATERMARK_FREE_FORMAT = (
 
 _FETCH_RETRIES = 3
 _FETCH_RETRY_BASE_WAIT = 2   # seconds, doubles each attempt
+_PROFILE_BATCH = 50          # default fetch limit — covers most active channels
 
 
-def get_profile_videos(tiktok_username: str) -> Optional[List[Dict[str, Any]]]:
+def get_profile_videos(tiktok_username: str,
+                       end: Optional[int] = _PROFILE_BATCH) -> Optional[List[Dict[str, Any]]]:
     """
     Fetch video metadata from a public TikTok profile.
     Returns:
@@ -61,6 +63,10 @@ def get_profile_videos(tiktok_username: str) -> Optional[List[Dict[str, Any]]]:
       - None if the profile could not be fetched after all retries (network/TikTok error)
         — callers must treat None as an alert-worthy failure, not just "no content"
     Does NOT download — just lists metadata.
+
+    Args:
+      end: Stop after this many videos (newest-first). Pass None to fetch all.
+           Defaults to _PROFILE_BATCH (50) — callers fall back to None when needed.
     """
     url = f"https://www.tiktok.com/@{tiktok_username}"
     ydl_opts = {
@@ -70,6 +76,8 @@ def get_profile_videos(tiktok_username: str) -> Optional[List[Dict[str, Any]]]:
         "ignoreerrors": True,
         "skip_download": True,
     }
+    if end is not None:
+        ydl_opts["playlistend"] = end
     _inject_cookies(ydl_opts)
 
     logger.info("Fetching video list from TikTok: @%s", tiktok_username)
