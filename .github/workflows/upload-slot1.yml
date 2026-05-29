@@ -104,6 +104,7 @@ jobs:
           fi
           cp data/channel_4.db /tmp/channel_4_new.db
           git fetch origin main
+          git restore data/channel_4.db 2>/dev/null || git checkout -- data/channel_4.db 2>/dev/null || true
           git checkout -B main origin/main
           cp /tmp/channel_4_new.db data/channel_4.db
           git config user.name "github-actions[bot]"
@@ -116,6 +117,7 @@ jobs:
               echo "Push failed (attempt $i/3) -- re-basing DB onto latest origin..."
               cp data/channel_4.db /tmp/channel_4_retry.db
               git fetch origin main
+              git restore data/channel_4.db 2>/dev/null || git checkout -- data/channel_4.db 2>/dev/null || true
               git checkout -B main origin/main
               cp /tmp/channel_4_retry.db data/channel_4.db
               git add -f data/channel_4.db
