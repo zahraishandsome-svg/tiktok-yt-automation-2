@@ -53,5 +53,5 @@ channels:
     shorts_max_seconds: 180
     upload_mode: short_only
     slot_publish_times_utc:
-      1: "15:00"   # PUBLIC at 5 PM CEST (UTC+2, France) — uploaded 2h earlier at 13:00 UTC
-      2: "17:00"   # PUBLIC at 7 PM CEST (UTC+2, France) — uploaded 2h earlier at 15:00 UTC
+      1: "15:00"   # PUBLIC at 8 PM PKT (UTC+5) = 5 PM CEST (France) — uploaded 2h earlier at 13:00 UTC
+      2: "17:00"   # PUBLIC at 10 PM PKT (UTC+5) = 7 PM CEST (France) — uploaded 2h earlier at 15:00 UTC
