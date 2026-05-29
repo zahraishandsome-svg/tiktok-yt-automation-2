@@ -52,6 +52,10 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS posted_videos (
                 channel_id          TEXT NOT NULL,
                 tiktok_video_id     TEXT NOT NULL,
+                format_type         TEXT NOT NULL DEFAULT 'short',
+                    -- short | longform
+                    -- 'short'   = original 9:16 vertical (YouTube Short or regular)
+                    -- 'longform' = 4:3 blurred-fill horizontal (dual/longform_only modes)
                 tiktok_url          TEXT,
                 tiktok_title        TEXT,
                 tiktok_timestamp    INTEGER,   -- Unix epoch of TikTok post date
@@ -65,7 +69,7 @@ def init_db() -> None:
                 error_message       TEXT,
                 created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at          TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (channel_id, tiktok_video_id)
+                PRIMARY KEY (channel_id, tiktok_video_id, format_type)
             );
 
             CREATE TABLE IF NOT EXISTS runs (
@@ -86,8 +90,57 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_runs_channel_date
                 ON runs (channel_id, run_date);
         """)
+    # Migrate existing DBs that pre-date the format_type column
+    _migrate_add_format_type(conn)
     conn.close()
     logger.debug("Database initialised at %s", _get_db_path())
+
+
+def _migrate_add_format_type(conn: sqlite3.Connection) -> None:
+    """
+    One-time migration: add format_type column + update PRIMARY KEY.
+    Safe to call repeatedly — no-ops if already migrated.
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(posted_videos)")]
+    if "format_type" in cols:
+        return  # already done
+
+    logger.info("Migrating posted_videos: adding format_type column…")
+    conn.executescript("""
+        CREATE TABLE posted_videos_new (
+            channel_id          TEXT NOT NULL,
+            tiktok_video_id     TEXT NOT NULL,
+            format_type         TEXT NOT NULL DEFAULT 'short',
+            tiktok_url          TEXT,
+            tiktok_title        TEXT,
+            tiktok_timestamp    INTEGER,
+            youtube_video_id    TEXT,
+            posted_at           TEXT,
+            status              TEXT DEFAULT 'pending',
+            retry_count         INTEGER DEFAULT 0,
+            next_retry_date     TEXT,
+            error_message       TEXT,
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (channel_id, tiktok_video_id, format_type)
+        );
+
+        INSERT INTO posted_videos_new
+        SELECT channel_id, tiktok_video_id, 'short',
+               tiktok_url, tiktok_title, tiktok_timestamp,
+               youtube_video_id, posted_at, status,
+               retry_count, next_retry_date, error_message,
+               created_at, updated_at
+        FROM posted_videos;
+
+        DROP TABLE posted_videos;
+        ALTER TABLE posted_videos_new RENAME TO posted_videos;
+
+        DROP INDEX IF EXISTS idx_posted_videos_channel_status;
+        CREATE INDEX idx_posted_videos_channel_status
+            ON posted_videos (channel_id, status);
+    """)
+    logger.info("Migration complete.")
 
 
 # ── Channel registry ──────────────────────────────────────────────────────────
@@ -115,15 +168,60 @@ def upsert_channel(channel_cfg: Dict[str, Any]) -> None:
 
 # ── Video state ───────────────────────────────────────────────────────────────
 
-def get_posted_video_ids(channel_id: str) -> set:
-    """Return set of tiktok_video_id values that are already uploaded or permanently failed."""
+def get_posted_video_ids(channel_id: str, upload_mode: str = "short_only") -> set:
+    """
+    Returns video IDs that must NOT be selected for a new upload.
+
+    upload_mode determines which format(s) must be "done" for a video to be skipped:
+      short_only    — skip if format_type='short' has a done-status (legacy, unchanged)
+      longform_only — skip if ANY format has a done-status. This means videos already
+                      uploaded as Shorts (short_only mode) are not re-uploaded when the
+                      channel switches to longform_only.
+      dual          — same as longform_only: skip if ANY format has a done-status.
+
+    Done-statuses: uploaded | failed_permanent | skipped | pending_retry
+    ('pending_retry' is included so failed videos go through the retry path,
+     not be re-selected as a brand-new video.)
+    """
     conn = get_connection()
-    rows = conn.execute("""
-        SELECT tiktok_video_id FROM posted_videos
-        WHERE channel_id = ? AND status IN ('uploaded', 'failed_permanent', 'skipped')
-    """, (channel_id,)).fetchall()
+
+    if upload_mode in ("longform_only", "dual", "split"):
+        # Exclude a video if it has ANY done-status row in ANY format.
+        # This prevents re-uploading a video that was previously posted as a
+        # Short (short_only) and the channel later switched to longform_only/dual.
+        # "split" uses the same cross-format exclusion so slot 1 and slot 2 always
+        # pick different TikTok videos (one short, one longform per day).
+        rows = conn.execute("""
+            SELECT DISTINCT tiktok_video_id FROM posted_videos
+            WHERE channel_id = ?
+              AND status IN ('uploaded', 'failed_permanent', 'skipped', 'pending_retry')
+        """, (channel_id,)).fetchall()
+
+    else:  # short_only (default — preserves exact legacy behaviour)
+        rows = conn.execute("""
+            SELECT tiktok_video_id FROM posted_videos
+            WHERE channel_id = ? AND format_type = 'short'
+              AND status IN ('uploaded', 'failed_permanent', 'skipped', 'pending_retry')
+        """, (channel_id,)).fetchall()
+
     conn.close()
     return {row["tiktok_video_id"] for row in rows}
+
+
+def get_format_status(channel_id: str, tiktok_video_id: str,
+                      format_type: str) -> Optional[str]:
+    """
+    Return the current status for a specific (channel, video, format) triple,
+    or None if no row exists yet.
+    Used by channel_runner in dual mode to check which formats still need uploading.
+    """
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT status FROM posted_videos
+        WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
+    """, (channel_id, tiktok_video_id, format_type)).fetchone()
+    conn.close()
+    return row["status"] if row else None
 
 
 def get_videos_for_retry(channel_id: str, today: date) -> List[Dict]:
@@ -140,17 +238,23 @@ def get_videos_for_retry(channel_id: str, today: date) -> List[Dict]:
     return [dict(row) for row in rows]
 
 
-def record_video_seen(channel_id: str, video: Dict[str, Any]) -> None:
-    """Insert a new video into the DB with status=pending if not already tracked."""
+def record_video_seen(channel_id: str, video: Dict[str, Any],
+                      format_type: str = "short") -> None:
+    """
+    Insert a new video into the DB with status=pending if not already tracked.
+    format_type defaults to 'short' (legacy behaviour).
+    """
     conn = get_connection()
     with conn:
         conn.execute("""
             INSERT OR IGNORE INTO posted_videos
-                (channel_id, tiktok_video_id, tiktok_url, tiktok_title, tiktok_timestamp, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
+                (channel_id, tiktok_video_id, format_type,
+                 tiktok_url, tiktok_title, tiktok_timestamp, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending')
         """, (
             channel_id,
             video["id"],
+            format_type,
             video.get("url"),
             video.get("title"),
             video.get("timestamp"),
@@ -158,32 +262,56 @@ def record_video_seen(channel_id: str, video: Dict[str, Any]) -> None:
     conn.close()
 
 
-def mark_uploaded(channel_id: str, tiktok_video_id: str, youtube_video_id: str) -> None:
+def mark_uploaded(channel_id: str, tiktok_video_id: str, youtube_video_id: str,
+                  format_type: str = "short",
+                  tiktok_url: str = None, tiktok_title: str = None,
+                  tiktok_timestamp: int = None) -> None:
+    """
+    Upsert a (channel, video, format) triple as uploaded.
+
+    Uses INSERT … ON CONFLICT DO UPDATE so it works whether or not
+    record_video_seen() was previously called with the same format_type.
+    This is critical for longform_only/dual modes where the 'longform' row
+    may not have been pre-inserted by record_video_seen().
+
+    format_type defaults to 'short' (legacy behaviour).
+    """
+    now = datetime.utcnow().isoformat()
     conn = get_connection()
     with conn:
         conn.execute("""
-            UPDATE posted_videos
-            SET status = 'uploaded', youtube_video_id = ?, posted_at = ?,
-                retry_count = 0, next_retry_date = NULL, error_message = NULL,
-                updated_at = ?
-            WHERE channel_id = ? AND tiktok_video_id = ?
+            INSERT INTO posted_videos
+                (channel_id, tiktok_video_id, format_type,
+                 tiktok_url, tiktok_title, tiktok_timestamp,
+                 youtube_video_id, posted_at, status,
+                 retry_count, next_retry_date, error_message,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0, NULL, NULL, ?, ?)
+            ON CONFLICT(channel_id, tiktok_video_id, format_type) DO UPDATE SET
+                status          = 'uploaded',
+                youtube_video_id = excluded.youtube_video_id,
+                posted_at        = excluded.posted_at,
+                retry_count      = 0,
+                next_retry_date  = NULL,
+                error_message    = NULL,
+                updated_at       = excluded.updated_at
         """, (
-            youtube_video_id,
-            datetime.utcnow().isoformat(),
-            datetime.utcnow().isoformat(),
-            channel_id,
-            tiktok_video_id,
+            channel_id, tiktok_video_id, format_type,
+            tiktok_url, tiktok_title, tiktok_timestamp,
+            youtube_video_id, now, now, now,
         ))
     conn.close()
 
 
-def mark_deleted_repost_pending(channel_id: str, tiktok_video_id: str) -> None:
+def mark_deleted_repost_pending(channel_id: str, tiktok_video_id: str,
+                                 format_type: str = "short") -> None:
     """
     Mark a video whose YouTube copy was deleted as pending re-upload.
     The video will be re-selected by _pick_next_video() on the next run
     because get_posted_video_ids() does not include 'deleted_repost_pending'.
     Clears the youtube_video_id so the old (deleted) ID is not confused with
     any future upload.
+    format_type defaults to 'short' (legacy behaviour).
     """
     conn = get_connection()
     with conn:
@@ -194,8 +322,8 @@ def mark_deleted_repost_pending(channel_id: str, tiktok_video_id: str) -> None:
                 posted_at = NULL,
                 error_message = 'YouTube video deleted — repost pending',
                 updated_at = ?
-            WHERE channel_id = ? AND tiktok_video_id = ?
-        """, (datetime.utcnow().isoformat(), channel_id, tiktok_video_id))
+            WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
+        """, (datetime.utcnow().isoformat(), channel_id, tiktok_video_id, format_type))
     conn.close()
 
 
@@ -219,13 +347,18 @@ def delete_todays_success_runs(channel_id: str) -> int:
 
 
 def mark_retry(channel_id: str, tiktok_video_id: str,
-               error_message: str, next_retry_date: date, max_retries: int) -> None:
-    """Increment retry counter. If max exceeded, mark as failed_permanent."""
+               error_message: str, next_retry_date: date, max_retries: int,
+               format_type: str = "short") -> None:
+    """
+    Increment retry counter for a specific format.
+    If max exceeded, mark as failed_permanent.
+    format_type defaults to 'short' (legacy behaviour).
+    """
     conn = get_connection()
     row = conn.execute("""
         SELECT retry_count FROM posted_videos
-        WHERE channel_id = ? AND tiktok_video_id = ?
-    """, (channel_id, tiktok_video_id)).fetchone()
+        WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
+    """, (channel_id, tiktok_video_id, format_type)).fetchone()
 
     current_count = (row["retry_count"] if row else 0) + 1
     now = datetime.utcnow().isoformat()
@@ -236,20 +369,21 @@ def mark_retry(channel_id: str, tiktok_video_id: str,
                 UPDATE posted_videos
                 SET status = 'failed_permanent', retry_count = ?,
                     error_message = ?, updated_at = ?
-                WHERE channel_id = ? AND tiktok_video_id = ?
-            """, (current_count, error_message, now, channel_id, tiktok_video_id))
+                WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
+            """, (current_count, error_message, now,
+                  channel_id, tiktok_video_id, format_type))
             logger.warning(
-                "Video %s on channel %s permanently failed after %d retries",
-                tiktok_video_id, channel_id, current_count
+                "Video %s / %s on channel %s permanently failed after %d retries",
+                tiktok_video_id, format_type, channel_id, current_count,
             )
         else:
             conn.execute("""
                 UPDATE posted_videos
                 SET status = 'pending_retry', retry_count = ?,
                     next_retry_date = ?, error_message = ?, updated_at = ?
-                WHERE channel_id = ? AND tiktok_video_id = ?
+                WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
             """, (current_count, next_retry_date.isoformat(), error_message, now,
-                  channel_id, tiktok_video_id))
+                  channel_id, tiktok_video_id, format_type))
     conn.close()
 
 

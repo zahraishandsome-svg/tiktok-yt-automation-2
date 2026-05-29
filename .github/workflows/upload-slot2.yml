@@ -1,9 +1,9 @@
-name: Upload Slot 2 - Channel 4 (10 PM France)
+name: Upload Slot 2 - Channel 4 (7 PM France)
 
 on:
   schedule:
-    # Upload at 16:00 UTC — video scheduled to go Public at 18:00 UTC (8 PM CEST / France)
-    - cron: "0 16 * * *"
+    # Upload at 15:00 UTC — video scheduled to go Public at 17:00 UTC (7 PM CEST / France)
+    - cron: "0 15 * * *"
   # Allow manual trigger from GitHub UI for testing
   workflow_dispatch:
     inputs:
@@ -44,6 +44,12 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get install -y --no-install-recommends --fix-missing ffmpeg || true
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
 
       - name: Restore DB cache
         uses: actions/cache@v4
@@ -94,6 +100,13 @@ jobs:
         with:
           path: data/channel_4.db
           key: automation-db-channel_4-${{ github.run_id }}
+
+      - name: Checkpoint DB WAL
+        if: always()
+        run: |
+          if [ -f data/channel_4.db ]; then
+            python -c "import sqlite3; c=sqlite3.connect('data/channel_4.db'); r=c.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone(); print('WAL checkpoint:', r); c.close()"
+          fi
 
       - name: Commit DB to repo
         if: always()

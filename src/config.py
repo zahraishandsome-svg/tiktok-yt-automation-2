@@ -65,6 +65,16 @@ def _validate_channel(ch: Dict[str, Any]) -> Dict[str, Any]:
     ch.setdefault("enabled", True)
     ch.setdefault("max_retry_days", 3)
     ch.setdefault("shorts_max_seconds", 180)  # 3 minutes
+    ch.setdefault("upload_mode", "short_only")
+    ch.setdefault("longform_title_suffix", "")
+
+    # Validate upload_mode
+    valid_modes = {"short_only", "dual", "longform_only", "split"}
+    if ch["upload_mode"] not in valid_modes:
+        raise ValueError(
+            f"Channel '{ch['id']}': upload_mode must be one of "
+            f"{sorted(valid_modes)}, got '{ch['upload_mode']}'"
+        )
 
     return ch
 

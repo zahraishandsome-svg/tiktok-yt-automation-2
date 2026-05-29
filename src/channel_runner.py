@@ -2,6 +2,21 @@
 Runs the full TikTok→YouTube pipeline for a single channel.
 Called by orchestrator.py — never runs all channels directly.
 Returns a result dict so orchestrator can aggregate and notify.
+
+Upload modes (set via upload_mode in channels.yaml):
+  short_only   (default) — original 9:16 uploaded as a YouTube Short (or regular if long/horizontal).
+                            Zero behaviour change for existing channels.
+  dual         — same TikTok source → Short upload + 4:3 blurred-fill longform upload.
+                 Both happen in a single slot run. Counts as 2 videos_uploaded.
+  longform_only — source converted to 4:3 blurred-fill, uploaded as a regular (non-Short) video.
+  split        — slot 1 picks a fresh TikTok and uploads it as a Short (9:16).
+                 slot 2 picks a DIFFERENT TikTok and uploads it as a 4:3 longform.
+                 Cross-format exclusion: a video uploaded in either format is never re-used.
+
+Horizontal source videos (width >= height) are NEVER converted:
+  - short_only:    upload as regular (non-Short) video — unchanged
+  - longform_only: upload as regular video (no conversion needed)
+  - dual:          upload once as regular video; both format_type rows marked done
 """
 
 import logging
@@ -14,14 +29,17 @@ from googleapiclient.errors import HttpError
 from . import db
 from .tiktok_downloader import (
     get_profile_videos, download_video, is_watermarked,
-    is_short_video, cleanup_download, cleanup_stale_downloads,
+    is_short_video, cleanup_download, cleanup_stale_downloads, _PROFILE_BATCH,
 )
 from .youtube_uploader import get_authenticated_client, upload_video
+from .video_converter import convert_to_4_3_blurred, is_ffmpeg_available, is_vertical as _file_is_vertical
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
+
+VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split"}
 
 
 class TikTokUnreachableError(Exception):
@@ -31,16 +49,20 @@ class TikTokUnreachableError(Exception):
 def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Dict[str, Any]:
     """
     Full pipeline for one channel, one slot.
-    Returns: {channel_id, slot, status, video_uploaded, youtube_url, error}
+    Returns: {channel_id, slot, status, video_uploaded, youtube_url,
+              youtube_url_longform, error}
     Never raises — all exceptions are caught and returned in the result dict.
     """
     channel_id = channel["id"]
+    upload_mode = channel.get("upload_mode", "short_only")
+
     result = {
         "channel_id": channel_id,
         "slot": slot,
         "status": "skipped",
         "video_uploaded": None,
         "youtube_url": None,
+        "youtube_url_longform": None,
         "error": None,
     }
 
@@ -61,7 +83,7 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
         cleanup_stale_downloads(DOWNLOADS_DIR, max_age_days=7)
 
         # Pick one video to upload this slot
-        video = _pick_next_video(channel, slot)
+        video = _pick_next_video(channel, slot, upload_mode)
         if video is None:
             logger.info("[%s] No unposted videos available for slot %d", channel_id, slot)
             db.finish_run(run_id, "no_content")
@@ -70,45 +92,23 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
 
         logger.info("[%s] Selected video: %s | '%s'", channel_id, video["id"], video.get("title", ""))
 
-        # Download
-        local_file = _download_with_retry(channel, video, dry_run)
-        if local_file is None:
-            _handle_download_failure(channel, video, "Download failed after retries")
-            db.finish_run(run_id, "failed", error_message="Download failed")
-            result["status"] = "failed"
-            result["error"] = "Download failed"
-            return result
-
-        # Determine Short vs regular
-        short = is_short_video(
-            duration=video.get("duration"),
-            width=video.get("width"),
-            height=video.get("height"),
-            max_seconds=channel.get("shorts_max_seconds", 180),
-        )
-
-        # Upload
-        youtube_id = _upload_video(channel, video, local_file, short, slot, dry_run)
-
-        if youtube_id:
-            if not dry_run:
-                db.mark_uploaded(channel_id, video["id"], youtube_id)
-                db.finish_run(run_id, "success", videos_uploaded=1)
+        # Dispatch to mode-specific runner.
+        # NOTE: vertical orientation is determined AFTER download (from the actual
+        # file via ffprobe) because extract_flat metadata often omits width/height.
+        if upload_mode == "dual":
+            _run_dual(channel, video, slot, run_id, dry_run, result)
+        elif upload_mode == "longform_only":
+            _run_longform_only(channel, video, slot, run_id, dry_run, result)
+        elif upload_mode == "split":
+            # Slot 1 → Short (9:16); Slot 2 → Longform (4:3 blurred-fill).
+            # Each slot picks a completely different TikTok video.
+            if slot == 2:
+                _run_longform_only(channel, video, slot, run_id, dry_run, result)
             else:
-                # Dry run: do NOT write to DB so real runs aren't blocked
-                db.finish_run(run_id, "dry_run", videos_uploaded=0)
-                logger.info("[%s] [DRY RUN] Would have uploaded: https://www.youtube.com/watch?v=%s", channel_id, youtube_id)
-            cleanup_download(local_file)
-            result["status"] = "success"
-            result["video_uploaded"] = video.get("title", video["id"])
-            result["youtube_url"] = f"https://www.youtube.com/watch?v={youtube_id}"
-            if not dry_run:
-                logger.info("[%s] ✓ Uploaded: %s", channel_id, result["youtube_url"])
+                _run_short_only(channel, video, slot, run_id, dry_run, result)
         else:
-            _handle_upload_failure(channel, video, "Upload returned no video ID")
-            db.finish_run(run_id, "failed", error_message="Upload failed")
-            result["status"] = "failed"
-            result["error"] = "Upload returned no video ID"
+            # short_only (default) — original behaviour
+            _run_short_only(channel, video, slot, run_id, dry_run, result)
 
     except TikTokUnreachableError as exc:
         error_msg = str(exc)
@@ -134,23 +134,309 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
     return result
 
 
+# ── Mode-specific runners ─────────────────────────────────────────────────────
+
+def _run_short_only(channel, video, slot, run_id, dry_run, result):
+    """Original behaviour — unchanged."""
+    channel_id = channel["id"]
+
+    local_file = _download_with_retry(channel, video, dry_run)
+    if local_file is None:
+        _handle_download_failure(channel, video, "Download failed after retries",
+                                 format_type="short")
+        db.finish_run(run_id, "failed", error_message="Download failed")
+        result["status"] = "failed"
+        result["error"] = "Download failed"
+        return
+
+    short = is_short_video(
+        duration=video.get("duration"),
+        width=video.get("width"),
+        height=video.get("height"),
+        max_seconds=channel.get("shorts_max_seconds", 180),
+    )
+
+    youtube_id = _upload_video(channel, video, local_file, short, slot, dry_run)
+
+    if youtube_id:
+        if not dry_run:
+            db.mark_uploaded(channel_id, video["id"], youtube_id, format_type="short",
+                             tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                             tiktok_timestamp=video.get("timestamp"))
+            db.finish_run(run_id, "success", videos_uploaded=1)
+        else:
+            db.finish_run(run_id, "dry_run", videos_uploaded=0)
+            logger.info("[%s] [DRY RUN] Would have uploaded: https://www.youtube.com/watch?v=%s",
+                        channel_id, youtube_id)
+        cleanup_download(local_file)
+        result["status"] = "success"
+        result["video_uploaded"] = video.get("title", video["id"])
+        result["youtube_url"] = f"https://www.youtube.com/watch?v={youtube_id}"
+        if not dry_run:
+            logger.info("[%s] Uploaded: %s", channel_id, result["youtube_url"])
+    else:
+        _handle_upload_failure(channel, video, "Upload returned no video ID",
+                                format_type="short")
+        db.finish_run(run_id, "failed", error_message="Upload failed")
+        result["status"] = "failed"
+        result["error"] = "Upload returned no video ID"
+
+
+def _run_longform_only(channel, video, slot, run_id, dry_run, result):
+    """
+    Upload ONLY the 4:3 blurred-fill version.
+    Horizontal videos are uploaded as-is (no conversion needed).
+    Orientation is probed from the downloaded file (not from TikTok metadata,
+    which is often missing width/height in extract_flat mode).
+    """
+    channel_id = channel["id"]
+
+    local_file = _download_with_retry(channel, video, dry_run)
+    if local_file is None:
+        _handle_download_failure(channel, video, "Download failed after retries",
+                                 format_type="longform")
+        db.finish_run(run_id, "failed", error_message="Download failed")
+        result["status"] = "failed"
+        result["error"] = "Download failed"
+        return
+
+    # Probe orientation from the actual file (reliable even when metadata is absent)
+    vertical = _file_is_vertical(local_file) if not dry_run else (
+        (video.get("height") or 0) > (video.get("width") or 0)
+    )
+    logger.info("[%s] Video orientation: %s", channel_id,
+                "vertical (will convert to 4:3)" if vertical else "horizontal (upload as-is)")
+
+    # Convert vertical → 4:3 blurred-fill; horizontal passes through unchanged
+    upload_file = local_file
+    converted_file = None
+    if vertical and not dry_run:
+        converted_file = _convert_video(channel, video, local_file, format_type="longform")
+        if converted_file is None:
+            db.finish_run(run_id, "failed", error_message="Conversion failed")
+            result["status"] = "failed"
+            result["error"] = "4:3 conversion failed"
+            cleanup_download(local_file)
+            return
+        upload_file = converted_file
+
+    # Longform uploads are NEVER Shorts (they are horizontal 4:3)
+    title = _resolve_longform_title(channel, video)
+    youtube_id = _upload_video(
+        channel, video, upload_file, is_short=False, slot=slot, dry_run=dry_run,
+        title_override=title,
+    )
+
+    # Clean up both files
+    cleanup_download(local_file)
+    if converted_file and converted_file != local_file:
+        cleanup_download(converted_file)
+
+    if youtube_id:
+        if not dry_run:
+            db.mark_uploaded(channel_id, video["id"], youtube_id, format_type="longform",
+                             tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                             tiktok_timestamp=video.get("timestamp"))
+            db.finish_run(run_id, "success", videos_uploaded=1)
+        else:
+            db.finish_run(run_id, "dry_run", videos_uploaded=0)
+            logger.info("[%s] [DRY RUN] Would have uploaded longform: https://www.youtube.com/watch?v=%s",
+                        channel_id, youtube_id)
+        result["status"] = "success"
+        result["video_uploaded"] = video.get("title", video["id"])
+        result["youtube_url"] = f"https://www.youtube.com/watch?v={youtube_id}"
+        if not dry_run:
+            logger.info("[%s] Longform uploaded: %s", channel_id, result["youtube_url"])
+    else:
+        _handle_upload_failure(channel, video, "Upload returned no video ID",
+                                format_type="longform")
+        db.finish_run(run_id, "failed", error_message="Upload failed")
+        result["status"] = "failed"
+        result["error"] = "Upload returned no video ID"
+
+
+def _run_dual(channel, video, slot, run_id, dry_run, result):
+    """
+    Upload BOTH the original Short (9:16) AND the 4:3 blurred-fill longform.
+    Horizontal videos are uploaded once and marked done for both formats.
+    Orientation is probed from the downloaded file (reliable vs. extract_flat metadata).
+    """
+    channel_id = channel["id"]
+
+    # Check which formats are already done (handles partial-failure retries)
+    short_status = db.get_format_status(channel_id, video["id"], "short")
+    longform_status = db.get_format_status(channel_id, video["id"], "longform")
+
+    short_done = short_status in ("uploaded", "failed_permanent", "skipped")
+    longform_done = longform_status in ("uploaded", "failed_permanent", "skipped")
+
+    if short_done and longform_done:
+        logger.info("[%s] Both formats already done for %s — skipping",
+                    channel_id, video["id"])
+        db.finish_run(run_id, "skipped")
+        result["status"] = "skipped"
+        return
+
+    # Download once (shared between both uploads)
+    local_file = _download_with_retry(channel, video, dry_run)
+    if local_file is None:
+        if not short_done:
+            _handle_download_failure(channel, video, "Download failed after retries",
+                                     format_type="short")
+        if not longform_done:
+            _handle_download_failure(channel, video, "Download failed after retries",
+                                     format_type="longform")
+        db.finish_run(run_id, "failed", error_message="Download failed")
+        result["status"] = "failed"
+        result["error"] = "Download failed"
+        return
+
+    # Probe orientation from the actual file
+    vertical = _file_is_vertical(local_file) if not dry_run else (
+        (video.get("height") or 0) > (video.get("width") or 0)
+    )
+    logger.info("[%s] Video orientation: %s", channel_id,
+                "vertical" if vertical else "horizontal (upload once, mark both formats done)")
+
+    videos_uploaded = 0
+    short_yt_id = None
+    longform_yt_id = None
+
+    # ── Short upload ───────────────────────────────────────────────────────────
+    if not short_done:
+        if vertical:
+            short_is_short = is_short_video(
+                duration=video.get("duration"),
+                width=video.get("width"),
+                height=video.get("height"),
+                max_seconds=channel.get("shorts_max_seconds", 180),
+            )
+        else:
+            short_is_short = False  # horizontal → regular video
+
+        short_yt_id = _upload_video(channel, video, local_file,
+                                     is_short=short_is_short, slot=slot, dry_run=dry_run)
+        if short_yt_id:
+            if not dry_run:
+                db.mark_uploaded(channel_id, video["id"], short_yt_id, format_type="short",
+                                 tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                                 tiktok_timestamp=video.get("timestamp"))
+            videos_uploaded += 1
+            result["youtube_url"] = f"https://www.youtube.com/watch?v={short_yt_id}"
+            logger.info("[%s] Short uploaded: %s", channel_id, result["youtube_url"])
+        else:
+            _handle_upload_failure(channel, video, "Short upload returned no video ID",
+                                    format_type="short")
+            logger.warning("[%s] Short upload failed for %s", channel_id, video["id"])
+
+    # ── Longform upload ────────────────────────────────────────────────────────
+    if not longform_done:
+        converted_file = None
+        upload_file = local_file
+
+        if vertical and not dry_run:
+            converted_file = _convert_video(channel, video, local_file, format_type="longform")
+            if converted_file is None:
+                # Conversion failed — mark longform for retry, continue
+                _handle_upload_failure(channel, video, "4:3 conversion failed",
+                                        format_type="longform")
+                logger.warning("[%s] Longform conversion failed for %s", channel_id, video["id"])
+            else:
+                upload_file = converted_file
+
+        if converted_file is not None or not vertical or dry_run:
+            # Horizontal videos: upload original file directly (no conversion)
+            longform_title = _resolve_longform_title(channel, video)
+            longform_yt_id = _upload_video(
+                channel, video, upload_file, is_short=False, slot=slot, dry_run=dry_run,
+                title_override=longform_title,
+            )
+            if longform_yt_id:
+                if not dry_run:
+                    db.mark_uploaded(channel_id, video["id"], longform_yt_id, format_type="longform",
+                                     tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                                     tiktok_timestamp=video.get("timestamp"))
+                    if not vertical:
+                        # Horizontal: also mark short as done (same upload serves both)
+                        db.mark_uploaded(channel_id, video["id"], longform_yt_id, format_type="short",
+                                         tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                                         tiktok_timestamp=video.get("timestamp"))
+                videos_uploaded += 1
+                result["youtube_url_longform"] = f"https://www.youtube.com/watch?v={longform_yt_id}"
+                logger.info("[%s] Longform uploaded: %s", channel_id, result["youtube_url_longform"])
+            else:
+                _handle_upload_failure(channel, video, "Longform upload returned no video ID",
+                                        format_type="longform")
+                logger.warning("[%s] Longform upload failed for %s", channel_id, video["id"])
+
+            if converted_file and converted_file != local_file:
+                cleanup_download(converted_file)
+
+    cleanup_download(local_file)
+
+    # ── Result ─────────────────────────────────────────────────────────────────
+    if videos_uploaded > 0:
+        if not dry_run:
+            db.finish_run(run_id, "success", videos_uploaded=videos_uploaded)
+        else:
+            db.finish_run(run_id, "dry_run", videos_uploaded=0)
+        result["status"] = "success"
+        result["video_uploaded"] = video.get("title", video["id"])
+    else:
+        db.finish_run(run_id, "failed", error_message="All uploads failed")
+        result["status"] = "failed"
+        result["error"] = "All uploads failed"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _convert_video(channel: Dict[str, Any], video: Dict[str, Any],
+                   local_file: Path, format_type: str) -> Optional[Path]:
+    """
+    Convert to 4:3 blurred-fill. Returns converted path, or None on failure.
+    """
+    channel_id = channel["id"]
+    converted_path = local_file.parent / f"{local_file.stem}_longform.mp4"
+    try:
+        return convert_to_4_3_blurred(local_file, converted_path)
+    except Exception as exc:
+        logger.error("[%s] Conversion error for %s: %s", channel_id, video["id"], exc)
+        _handle_upload_failure(channel, video, f"Conversion failed: {exc}",
+                                format_type=format_type)
+        return None
+
+
+def _resolve_longform_title(channel: Dict[str, Any], video: Dict[str, Any]) -> str:
+    """
+    Title for the longform (4:3) upload.
+    Appends longform_title_suffix from channel config (default: empty string).
+    """
+    base = _resolve_title(channel, video)
+    suffix = (channel.get("longform_title_suffix") or "").strip()
+    if suffix:
+        # Ensure total length stays within YouTube's 100-char limit
+        combined = f"{base} {suffix}"
+        if len(combined) <= 100:
+            return combined
+        # Truncate base to fit suffix
+        max_base = 100 - len(suffix) - 1
+        return f"{base[:max_base].rstrip()} {suffix}"
+    return base
+
+
 # ── Video selection ───────────────────────────────────────────────────────────
 
-def _pick_next_video(channel: Dict[str, Any], slot: int) -> Optional[Dict[str, Any]]:
+def _pick_next_video(channel: Dict[str, Any], slot: int,
+                     upload_mode: str = "short_only") -> Optional[Dict[str, Any]]:
     """
     Priority order:
       1. Videos in pending_retry state that are due today (retries take priority)
       2. New unposted videos, sorted newest-first
 
-    This ensures new content always floats to the top while failed videos
-    get their retry window without blocking the queue indefinitely.
-
-    Supports two optional channel config keys:
+    Supports optional channel config keys:
       min_upload_date       YYYY-MM-DD — ignore TikTok videos older than this date.
       min_backlog_for_slot1 int — slot 1 is skipped unless at least this many
-                            unuploaded eligible videos exist. When the backlog drops
-                            below this threshold the channel automatically falls back
-                            to 1 upload/day (slot 2 only).
+                            unuploaded eligible videos exist.
     """
     channel_id = channel["id"]
     today = date.today()
@@ -171,35 +457,48 @@ def _pick_next_video(channel: Dict[str, Any], slot: int) -> Optional[Dict[str, A
             "timestamp": retries[0]["tiktok_timestamp"],
         }
 
-    # Fetch fresh profile and find newest unposted
-    videos = get_profile_videos(channel["tiktok_username"])
-    if videos is None:
-        # None = fetch failed (network error / TikTok blocked runner IP)
-        # Raise so run_channel can distinguish this from "no new content"
+    # Fetch first batch (fast path — newest _PROFILE_BATCH videos only)
+    raw_batch = get_profile_videos(channel["tiktok_username"])  # default end=_PROFILE_BATCH
+    if raw_batch is None:
         raise TikTokUnreachableError(
             f"TikTok profile @{channel['tiktok_username']} is unreachable after retries"
         )
-    if not videos:
+    if not raw_batch:
         return None
 
-    # Apply upload-date filter (monetised channels, fresh content only)
-    if min_ts is not None:
-        before = len(videos)
-        videos = [v for v in videos if (v.get("timestamp") or 0) >= min_ts]
-        filtered = before - len(videos)
-        if filtered:
-            logger.info(
-                "[%s] Filtered %d video(s) older than min_upload_date (%s)",
-                channel_id, filtered, channel["min_upload_date"],
+    already_posted = db.get_posted_video_ids(channel_id, upload_mode=upload_mode)
+
+    def _filter(vids):
+        if min_ts is not None:
+            vids = [v for v in vids if (v.get("timestamp") or 0) >= min_ts]
+        return [v for v in vids if v["id"] not in already_posted]
+
+    eligible = _filter(raw_batch)
+
+    # If all videos in the batch are already posted and we got a full batch,
+    # there may be older unposted videos — fall back to fetching the full profile.
+    if not eligible and len(raw_batch) >= _PROFILE_BATCH:
+        logger.info(
+            "[%s] All %d videos in first batch already posted — fetching full profile",
+            channel_id, _PROFILE_BATCH,
+        )
+        all_videos = get_profile_videos(channel["tiktok_username"], end=None)
+        if all_videos is None:
+            raise TikTokUnreachableError(
+                f"TikTok profile @{channel['tiktok_username']} is unreachable after retries"
             )
+        if min_ts is not None:
+            before = len(all_videos)
+            all_videos = [v for v in all_videos if (v.get("timestamp") or 0) >= min_ts]
+            filtered = before - len(all_videos)
+            if filtered:
+                logger.info(
+                    "[%s] Filtered %d video(s) older than min_upload_date (%s)",
+                    channel_id, filtered, channel["min_upload_date"],
+                )
+        eligible = [v for v in all_videos if v["id"] not in already_posted]
 
-    already_posted = db.get_posted_video_ids(channel_id)
-    eligible = [v for v in videos if v["id"] not in already_posted]
-
-    # Slot throttle: skip slot 1 when backlog is too small so the remaining
-    # video(s) are preserved for slot 2.  Once the backlog runs out entirely
-    # both slots return no_content and the channel idles until new TikTok
-    # videos arrive.
+    # Slot throttle: skip slot 1 when backlog is too small
     min_backlog = channel.get("min_backlog_for_slot1")
     if slot == 1 and min_backlog is not None and len(eligible) < int(min_backlog):
         logger.info(
@@ -210,8 +509,20 @@ def _pick_next_video(channel: Dict[str, Any], slot: int) -> Optional[Dict[str, A
         return None
 
     for video in eligible:
-        # Record it in DB so we can track it even if download fails
-        db.record_video_seen(channel_id, video)
+        # Record it in DB so we can track it even if download fails.
+        # Use format_type matching what this slot will actually upload so
+        # get_posted_video_ids() correctly excludes it on the next run.
+        # dual:         create the 'short' row (the 'longform' row is created by mark_uploaded upsert)
+        # longform_only: create the 'longform' row directly
+        # short_only:   create the 'short' row (legacy, unchanged)
+        # split:        slot 1 → 'short'; slot 2 → 'longform'
+        if upload_mode == "longform_only":
+            seen_format = "longform"
+        elif upload_mode == "split":
+            seen_format = "longform" if slot == 2 else "short"
+        else:
+            seen_format = "short"
+        db.record_video_seen(channel_id, video, format_type=seen_format)
         return video
 
     return None
@@ -249,7 +560,7 @@ def _download_with_retry(channel: Dict[str, Any], video: Dict[str, Any],
 
 
 def _handle_download_failure(channel: Dict[str, Any], video: Dict[str, Any],
-                              error_msg: str) -> None:
+                              error_msg: str, format_type: str = "short") -> None:
     today = date.today()
     db.mark_retry(
         channel_id=channel["id"],
@@ -257,9 +568,10 @@ def _handle_download_failure(channel: Dict[str, Any], video: Dict[str, Any],
         error_message=error_msg,
         next_retry_date=today + timedelta(days=1),
         max_retries=channel.get("max_retry_days", 3),
+        format_type=format_type,
     )
-    logger.warning("[%s] Video %s queued for retry tomorrow: %s",
-                   channel["id"], video["id"], error_msg)
+    logger.warning("[%s] Video %s / %s queued for retry tomorrow: %s",
+                   channel["id"], video["id"], format_type, error_msg)
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -291,7 +603,7 @@ def _resolve_title(channel: Dict[str, Any], video: Dict[str, Any]) -> str:
 
 def _upload_video(channel: Dict[str, Any], video: Dict[str, Any],
                   local_file: Path, is_short: bool, slot: int,
-                  dry_run: bool) -> Optional[str]:
+                  dry_run: bool, title_override: Optional[str] = None) -> Optional[str]:
     youtube = get_authenticated_client(
         credentials_file=channel["google_credentials_file"],
         token_file=channel["oauth_token_file"],
@@ -299,7 +611,7 @@ def _upload_video(channel: Dict[str, Any], video: Dict[str, Any],
     return upload_video(
         youtube_client=youtube,
         video_path=local_file,
-        title=_resolve_title(channel, video),
+        title=title_override or _resolve_title(channel, video),
         description=video.get("description") or "",
         tags=list(channel.get("default_tags") or []),
         category_id=str(channel.get("youtube_category_id", "22")),
@@ -319,7 +631,8 @@ def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
 
     GitHub Actions cron delays can be anywhere from minutes to 10+ hours.
     To handle this gracefully:
-      - If target time is still in the future: schedule for today
+      - If target time is still in the future (>15 min): schedule for today
+      - If target time is within 15 min: schedule for today (YouTube minimum is 5 min)
       - If target time already passed today: schedule for TOMORROW at the same time
         (never publish immediately — always respect the configured schedule)
     """
@@ -341,7 +654,6 @@ def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
 
     if delta_seconds < 0:
         # Target already passed today (GitHub cron ran late) — publish immediately.
-        # Missing a day entirely is worse than publishing at the wrong time.
         logger.info(
             "[%s] Slot %d: %02d:%02dZ already passed today (GitHub cron delay) — "
             "publishing immediately",
@@ -358,7 +670,7 @@ def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
 
 
 def _handle_upload_failure(channel: Dict[str, Any], video: Dict[str, Any],
-                            error_msg: str) -> None:
+                            error_msg: str, format_type: str = "short") -> None:
     today = date.today()
     db.mark_retry(
         channel_id=channel["id"],
@@ -366,4 +678,5 @@ def _handle_upload_failure(channel: Dict[str, Any], video: Dict[str, Any],
         error_message=error_msg,
         next_retry_date=today + timedelta(days=1),
         max_retries=channel.get("max_retry_days", 3),
+        format_type=format_type,
     )
