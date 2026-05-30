@@ -146,9 +146,9 @@ def seed(channel_cfg: dict) -> None:
             title = video.get("title", "")
             norm_tt = _normalise(title)
 
-            # Check if already in DB
+            # Check if already in DB (any format — don't re-seed if tracked at all)
             row = conn.execute(
-                "SELECT status FROM posted_videos WHERE channel_id=? AND tiktok_video_id=?",
+                "SELECT status FROM posted_videos WHERE channel_id=? AND tiktok_video_id=? LIMIT 1",
                 (channel_id, vid_id),
             ).fetchone()
 
@@ -161,9 +161,9 @@ def seed(channel_cfg: dict) -> None:
             if yt_vid_id:
                 conn.execute(
                     """INSERT INTO posted_videos
-                       (channel_id, tiktok_video_id, tiktok_title, tiktok_url, status,
-                        youtube_video_id, posted_at, retry_count)
-                       VALUES (?, ?, ?, ?, 'uploaded', ?, datetime('now'), 0)""",
+                       (channel_id, tiktok_video_id, format_type, tiktok_title, tiktok_url,
+                        status, youtube_video_id, posted_at, retry_count)
+                       VALUES (?, ?, 'short', ?, ?, 'uploaded', ?, datetime('now'), 0)""",
                     (channel_id, vid_id, title,
                      f"https://www.tiktok.com/@{tiktok_user}/video/{vid_id}",
                      yt_vid_id),
@@ -178,9 +178,9 @@ def seed(channel_cfg: dict) -> None:
                 if partial and norm_short:
                     conn.execute(
                         """INSERT INTO posted_videos
-                           (channel_id, tiktok_video_id, tiktok_title, tiktok_url, status,
-                            youtube_video_id, posted_at, retry_count)
-                           VALUES (?, ?, ?, ?, 'uploaded', ?, datetime('now'), 0)""",
+                           (channel_id, tiktok_video_id, format_type, tiktok_title, tiktok_url,
+                            status, youtube_video_id, posted_at, retry_count)
+                           VALUES (?, ?, 'short', ?, ?, 'uploaded', ?, datetime('now'), 0)""",
                         (channel_id, vid_id, title,
                          f"https://www.tiktok.com/@{tiktok_user}/video/{vid_id}",
                          partial),
