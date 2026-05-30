@@ -69,7 +69,7 @@ def _validate_channel(ch: Dict[str, Any]) -> Dict[str, Any]:
     ch.setdefault("longform_title_suffix", "")
 
     # Validate upload_mode
-    valid_modes = {"short_only", "dual", "longform_only", "split"}
+    valid_modes = {"short_only", "dual", "longform_only", "split", "trim_dual"}
     if ch["upload_mode"] not in valid_modes:
         raise ValueError(
             f"Channel '{ch['id']}': upload_mode must be one of "

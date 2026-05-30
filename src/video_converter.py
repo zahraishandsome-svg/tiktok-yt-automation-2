@@ -32,6 +32,24 @@ def is_ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def trim_video(input_path: Path, output_path: Path, duration_seconds: int = 179) -> Path:
+    """
+    Trim video to duration_seconds using stream copy (no re-encode, very fast).
+    Used by trim_dual mode: slot 2 trims slot 1's video to <3 min so YouTube treats it as a Short.
+    Returns output_path on success, raises on failure.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH")
+    cmd = [ffmpeg, "-y", "-i", str(input_path), "-t", str(duration_seconds),
+           "-c", "copy", str(output_path)]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg trim failed: {result.stderr.decode()[:300]}")
+    logger.info("[converter] Trimmed %s → %s (%ds)", input_path.name, output_path.name, duration_seconds)
+    return output_path
+
+
 def get_video_dimensions(path: Path) -> tuple:
     """
     Return (width, height) of a video file.

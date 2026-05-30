@@ -185,7 +185,7 @@ def get_posted_video_ids(channel_id: str, upload_mode: str = "short_only") -> se
     """
     conn = get_connection()
 
-    if upload_mode in ("longform_only", "dual", "split"):
+    if upload_mode in ("longform_only", "dual", "split", "trim_dual"):
         # Exclude a video if it has ANY done-status row in ANY format.
         # This prevents re-uploading a video that was previously posted as a
         # Short (short_only) and the channel later switched to longform_only/dual.
@@ -499,6 +499,24 @@ def get_todays_run_summary() -> List[Dict]:
         conn.close()
         all_rows.extend([dict(row) for row in rows])
     return all_rows
+
+
+def get_todays_longform_video(channel_id: str) -> Optional[Dict]:
+    """
+    Return the video uploaded as longform today for this channel (trim_dual slot 2 self-heal).
+    Returns a dict with tiktok_video_id, tiktok_url, tiktok_title, tiktok_timestamp, or None.
+    """
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT tiktok_video_id, tiktok_url, tiktok_title, tiktok_timestamp
+        FROM posted_videos
+        WHERE channel_id = ? AND format_type = 'longform'
+          AND status = 'uploaded'
+          AND date(posted_at) = date('now')
+        ORDER BY posted_at DESC LIMIT 1
+    """, (channel_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def slot_already_ran(channel_id: str, slot: int) -> bool:

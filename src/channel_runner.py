@@ -32,14 +32,14 @@ from .tiktok_downloader import (
     is_short_video, cleanup_download, cleanup_stale_downloads, _PROFILE_BATCH,
 )
 from .youtube_uploader import get_authenticated_client, upload_video
-from .video_converter import convert_to_4_3_blurred, is_ffmpeg_available, is_vertical as _file_is_vertical
+from .video_converter import convert_to_4_3_blurred, trim_video, is_ffmpeg_available, is_vertical as _file_is_vertical
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
 
-VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split"}
+VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split", "trim_dual"}
 
 
 class TikTokUnreachableError(Exception):
@@ -82,13 +82,28 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
         # Clean up any stale files from previous failed runs
         cleanup_stale_downloads(DOWNLOADS_DIR, max_age_days=7)
 
-        # Pick one video to upload this slot
-        video = _pick_next_video(channel, slot, upload_mode)
-        if video is None:
-            logger.info("[%s] No unposted videos available for slot %d", channel_id, slot)
-            db.finish_run(run_id, "no_content")
-            result["status"] = "no_content"
-            return result
+        # Pick one video to upload this slot.
+        # trim_dual slot 2: may not need a fresh video (uses today's longform from DB).
+        # Still try to pick one in case slot 1 failed and self-heal is needed.
+        if upload_mode == "trim_dual" and slot == 2:
+            today_longform = db.get_todays_longform_video(channel_id)
+            if today_longform is not None:
+                video = None  # slot 2 will use today's longform — no fresh pick needed
+            else:
+                # Slot 1 failed — pick a fresh video for self-heal
+                video = _pick_next_video(channel, 1, upload_mode)
+                if video is None:
+                    logger.info("[%s] No unposted videos available for slot 2 self-heal", channel_id)
+                    db.finish_run(run_id, "no_content")
+                    result["status"] = "no_content"
+                    return result
+        else:
+            video = _pick_next_video(channel, slot, upload_mode)
+            if video is None:
+                logger.info("[%s] No unposted videos available for slot %d", channel_id, slot)
+                db.finish_run(run_id, "no_content")
+                result["status"] = "no_content"
+                return result
 
         logger.info("[%s] Selected video: %s | '%s'", channel_id, video["id"], video.get("title", ""))
 
@@ -106,6 +121,11 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
                 _run_longform_only(channel, video, slot, run_id, dry_run, result)
             else:
                 _run_short_only(channel, video, slot, run_id, dry_run, result)
+        elif upload_mode == "trim_dual":
+            # Slot 1 → upload original 3+ min video as longform.
+            # Slot 2 → trim same video to 2:59, upload as Short.
+            # Slot 2 is self-healing: if slot 1 failed, it runs slot 1 first then trims.
+            _run_trim_dual(channel, video, slot, run_id, dry_run, result)
         else:
             # short_only (default) — original behaviour
             _run_short_only(channel, video, slot, run_id, dry_run, result)
@@ -388,6 +408,154 @@ def _run_dual(channel, video, slot, run_id, dry_run, result):
         result["error"] = "All uploads failed"
 
 
+def _run_trim_dual(channel, video, slot, run_id, dry_run, result):
+    """
+    trim_dual mode — for channels with 3+ min TikTok videos:
+      Slot 1: upload original video as longform (3+ min → not a Short automatically).
+      Slot 2: download same video, trim to 2:59, upload as Short.
+              Self-healing: if slot 1 failed, slot 2 runs slot 1 first then trims.
+    """
+    channel_id = channel["id"]
+    videos_uploaded = 0
+
+    if slot == 1:
+        # Upload original as longform (no conversion — 3+ min vertical uploads as regular video)
+        local_file = _download_with_retry(channel, video, dry_run)
+        if local_file is None:
+            _handle_download_failure(channel, video, "Download failed after retries", format_type="longform")
+            db.finish_run(run_id, "failed", error_message="Download failed")
+            result["status"] = "failed"
+            result["error"] = "Download failed"
+            return
+
+        youtube_id = _upload_video(channel, video, local_file, is_short=False, slot=slot, dry_run=dry_run)
+        cleanup_download(local_file)
+
+        if youtube_id:
+            if not dry_run:
+                db.mark_uploaded(channel_id, video["id"], youtube_id, format_type="longform",
+                                 tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                                 tiktok_timestamp=video.get("timestamp"))
+                db.finish_run(run_id, "success", videos_uploaded=1)
+            else:
+                db.finish_run(run_id, "dry_run", videos_uploaded=0)
+            result["status"] = "success"
+            result["video_uploaded"] = video.get("title", video["id"])
+            result["youtube_url"] = f"https://www.youtube.com/watch?v={youtube_id}"
+            logger.info("[%s] Longform uploaded: %s", channel_id, result["youtube_url"])
+        else:
+            _handle_upload_failure(channel, video, "Upload returned no video ID", format_type="longform")
+            db.finish_run(run_id, "failed", error_message="Upload failed")
+            result["status"] = "failed"
+            result["error"] = "Longform upload failed"
+
+    else:  # slot == 2
+        # Find today's longform video (slot 1 may or may not have run)
+        longform_row = db.get_todays_longform_video(channel_id)
+
+        if longform_row is None:
+            # Slot 1 failed — run it now before trimming
+            logger.warning("[%s] Slot 2 (trim_dual): no longform found today — running slot 1 first", channel_id)
+            if video is None:
+                logger.error("[%s] No video available to recover slot 1", channel_id)
+                db.finish_run(run_id, "failed", error_message="No video available for slot 1 recovery")
+                result["status"] = "failed"
+                result["error"] = "No video available"
+                return
+
+            local_file = _download_with_retry(channel, video, dry_run)
+            if local_file is None:
+                _handle_download_failure(channel, video, "Download failed after retries", format_type="longform")
+                db.finish_run(run_id, "failed", error_message="Download failed")
+                result["status"] = "failed"
+                result["error"] = "Download failed"
+                return
+
+            lf_youtube_id = _upload_video(channel, video, local_file, is_short=False, slot=1, dry_run=dry_run)
+            if not lf_youtube_id:
+                _handle_upload_failure(channel, video, "Longform upload failed", format_type="longform")
+                db.finish_run(run_id, "failed", error_message="Longform upload failed")
+                result["status"] = "failed"
+                result["error"] = "Longform upload failed"
+                cleanup_download(local_file)
+                return
+
+            if not dry_run:
+                db.mark_uploaded(channel_id, video["id"], lf_youtube_id, format_type="longform",
+                                 tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                                 tiktok_timestamp=video.get("timestamp"))
+            videos_uploaded += 1
+            result["youtube_url"] = f"https://www.youtube.com/watch?v={lf_youtube_id}"
+            logger.info("[%s] Recovered slot 1 longform: %s", channel_id, result["youtube_url"])
+
+            # Re-use the already-downloaded file for trimming below
+            longform_video = {"id": video["id"], "url": video.get("url"),
+                              "title": video.get("title"), "timestamp": video.get("timestamp")}
+            trim_source = local_file
+        else:
+            # Slot 1 already ran — download the same video again for trimming
+            longform_video = {
+                "id": longform_row["tiktok_video_id"],
+                "url": longform_row.get("tiktok_url"),
+                "title": longform_row.get("tiktok_title"),
+                "timestamp": longform_row.get("tiktok_timestamp"),
+            }
+            trim_source = _download_with_retry(channel, longform_video, dry_run)
+            if trim_source is None:
+                _handle_download_failure(channel, longform_video, "Download failed for trim", format_type="short")
+                db.finish_run(run_id, "failed", error_message="Download failed for trim")
+                result["status"] = "failed"
+                result["error"] = "Download failed for trim"
+                return
+
+        # Trim to 2:59 (179 seconds) and upload as Short
+        trimmed_file = None
+        try:
+            if not dry_run:
+                trimmed_file = trim_source.parent / f"{trim_source.stem}_short.mp4"
+                trim_video(trim_source, trimmed_file, duration_seconds=179)
+                upload_file = trimmed_file
+            else:
+                upload_file = trim_source
+
+            short_youtube_id = _upload_video(channel, longform_video, upload_file,
+                                              is_short=True, slot=slot, dry_run=dry_run)
+            if short_youtube_id:
+                if not dry_run:
+                    db.mark_uploaded(channel_id, longform_video["id"], short_youtube_id,
+                                     format_type="short",
+                                     tiktok_url=longform_video.get("url"),
+                                     tiktok_title=longform_video.get("title"),
+                                     tiktok_timestamp=longform_video.get("timestamp"))
+                videos_uploaded += 1
+                result["youtube_url_longform"] = result.get("youtube_url")
+                result["youtube_url"] = f"https://www.youtube.com/watch?v={short_youtube_id}"
+                logger.info("[%s] Trimmed Short uploaded: %s", channel_id, result["youtube_url"])
+            else:
+                _handle_upload_failure(channel, longform_video, "Short upload failed", format_type="short")
+                logger.warning("[%s] Trimmed Short upload failed", channel_id)
+
+        except Exception as exc:
+            logger.error("[%s] Trim/upload error: %s", channel_id, exc)
+            _handle_upload_failure(channel, longform_video, f"Trim error: {exc}", format_type="short")
+        finally:
+            cleanup_download(trim_source)
+            if trimmed_file and trimmed_file.exists():
+                cleanup_download(trimmed_file)
+
+        if videos_uploaded > 0:
+            if not dry_run:
+                db.finish_run(run_id, "success", videos_uploaded=videos_uploaded)
+            else:
+                db.finish_run(run_id, "dry_run", videos_uploaded=0)
+            result["status"] = "success"
+            result["video_uploaded"] = longform_video.get("title", longform_video["id"])
+        else:
+            db.finish_run(run_id, "failed", error_message="All uploads failed")
+            result["status"] = "failed"
+            result["error"] = "All uploads failed"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _convert_video(channel: Dict[str, Any], video: Dict[str, Any],
@@ -516,7 +684,7 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
         # longform_only: create the 'longform' row directly
         # short_only:   create the 'short' row (legacy, unchanged)
         # split:        slot 1 → 'short'; slot 2 → 'longform'
-        if upload_mode == "longform_only":
+        if upload_mode in ("longform_only", "trim_dual"):
             seen_format = "longform"
         elif upload_mode == "split":
             seen_format = "longform" if slot == 2 else "short"
