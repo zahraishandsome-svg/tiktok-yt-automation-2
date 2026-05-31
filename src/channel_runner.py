@@ -138,11 +138,24 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
         result["error"] = error_msg
 
     except HttpError as exc:
-        error_msg = f"YouTube API error: {exc.reason}"
-        logger.error("[%s] %s", channel_id, error_msg)
-        db.finish_run(run_id, "failed", error_message=error_msg)
-        result["status"] = "failed"
-        result["error"] = error_msg
+        # "Requested entity already exists" = video already on YouTube channel.
+        # Mark it as uploaded (skip silently) so the bot never retries it.
+        if "already exists" in str(exc).lower() and video is not None:
+            logger.warning(
+                "[%s] Video %s already exists on YouTube — marking as uploaded and skipping",
+                channel_id, video.get("id", "?"),
+            )
+            db.mark_uploaded(channel_id, video["id"], "already_on_yt",
+                             tiktok_url=video.get("url"), tiktok_title=video.get("title"),
+                             tiktok_timestamp=video.get("timestamp"))
+            db.finish_run(run_id, "skipped")
+            result["status"] = "skipped"
+        else:
+            error_msg = f"YouTube API error: {exc.reason}"
+            logger.error("[%s] %s", channel_id, error_msg)
+            db.finish_run(run_id, "failed", error_message=error_msg)
+            result["status"] = "failed"
+            result["error"] = error_msg
 
     except Exception as exc:
         error_msg = f"Unexpected error: {exc}"
