@@ -638,11 +638,19 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
             "timestamp": retries[0]["tiktok_timestamp"],
         }
 
+    # Resolve TikTok username — support tiktok_username_slot2 for dual-source channels.
+    # Slot 1 always uses the primary tiktok_username.
+    # Slot 2 uses tiktok_username_slot2 if configured, otherwise falls back to primary.
+    tiktok_user = channel["tiktok_username"]
+    if slot == 2 and channel.get("tiktok_username_slot2"):
+        tiktok_user = channel["tiktok_username_slot2"]
+        logger.info("[%s] Slot 2 using secondary TikTok account: @%s", channel_id, tiktok_user)
+
     # Fetch first batch (fast path — newest _PROFILE_BATCH videos only)
-    raw_batch = get_profile_videos(channel["tiktok_username"])  # default end=_PROFILE_BATCH
+    raw_batch = get_profile_videos(tiktok_user)  # default end=_PROFILE_BATCH
     if raw_batch is None:
         raise TikTokUnreachableError(
-            f"TikTok profile @{channel['tiktok_username']} is unreachable after retries"
+            f"TikTok profile @{tiktok_user} is unreachable after retries"
         )
     if not raw_batch:
         return None
@@ -663,10 +671,10 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
             "[%s] All %d videos in first batch already posted — fetching full profile",
             channel_id, _PROFILE_BATCH,
         )
-        all_videos = get_profile_videos(channel["tiktok_username"], end=None)
+        all_videos = get_profile_videos(tiktok_user, end=None)
         if all_videos is None:
             raise TikTokUnreachableError(
-                f"TikTok profile @{channel['tiktok_username']} is unreachable after retries"
+                f"TikTok profile @{tiktok_user} is unreachable after retries"
             )
         if min_ts is not None:
             before = len(all_videos)
