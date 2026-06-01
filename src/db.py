@@ -501,6 +501,23 @@ def get_todays_run_summary() -> List[Dict]:
     return all_rows
 
 
+def get_longformed_video_ids(channel_id: str) -> set:
+    """
+    Returns video IDs already uploaded as longform for this channel.
+    Used by tiered_split slot 2 — only excludes longform uploads,
+    allowing videos already uploaded as Short to be re-used as Longform.
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT DISTINCT tiktok_video_id FROM posted_videos
+        WHERE channel_id = ?
+          AND format_type = 'longform'
+          AND status IN ('uploaded', 'failed_permanent', 'skipped', 'pending_retry')
+    """, (channel_id,)).fetchall()
+    conn.close()
+    return {row["tiktok_video_id"] for row in rows}
+
+
 def get_todays_longform_video(channel_id: str) -> Optional[Dict]:
     """
     Return the video uploaded as longform today for this channel (trim_dual slot 2 self-heal).

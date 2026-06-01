@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
 
-VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split", "trim_dual"}
+VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split", "trim_dual", "tiered_split"}
 
 
 class TikTokUnreachableError(Exception):
@@ -126,6 +126,14 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
             # Slot 2 → trim same video to 2:59, upload as Short.
             # Slot 2 is self-healing: if slot 1 failed, it runs slot 1 first then trims.
             _run_trim_dual(channel, video, slot, run_id, dry_run, result)
+        elif upload_mode == "tiered_split":
+            # Slot 1 → newest Short (respects min_upload_date + min_backlog_for_slot1).
+            # Slot 2 → newest not-yet-longformed video ≥ longform_min_age_days old.
+            #          CAN re-use videos already uploaded as Short.
+            if slot == 2:
+                _run_longform_only(channel, video, slot, run_id, dry_run, result)
+            else:
+                _run_short_only(channel, video, slot, run_id, dry_run, result)
         else:
             # short_only (default) — original behaviour
             _run_short_only(channel, video, slot, run_id, dry_run, result)
@@ -622,6 +630,10 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
     channel_id = channel["id"]
     today = date.today()
 
+    # tiered_split slot 2 has its own dedicated picker — handle it separately.
+    if upload_mode == "tiered_split" and slot == 2:
+        return _pick_tiered_split_longform(channel)
+
     # Resolve optional date filter → Unix timestamp
     min_ts = _parse_min_upload_date(channel.get("min_upload_date"))
 
@@ -707,7 +719,7 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
         # split:        slot 1 → 'short'; slot 2 → 'longform'
         if upload_mode in ("longform_only", "trim_dual"):
             seen_format = "longform"
-        elif upload_mode == "split":
+        elif upload_mode in ("split", "tiered_split"):
             seen_format = "longform" if slot == 2 else "short"
         else:
             seen_format = "short"
@@ -715,6 +727,73 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
         return video
 
     return None
+
+
+def _pick_tiered_split_longform(channel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Video picker for tiered_split slot 2 (Longform).
+
+    Selects the newest TikTok video that:
+      - Is at least `longform_min_age_days` old (default 15) — avoids very recent content
+        already handled by slot 1 as Shorts.
+      - Has NOT already been uploaded as longform for this channel.
+      - MAY have been uploaded as a Short already (intentional — this creates the long
+        version of videos the channel previously posted as Shorts).
+
+    Fetches the FULL TikTok profile every time (required to surface older videos).
+    Returns newest-first within the eligible pool.
+    """
+    channel_id = channel["id"]
+    tiktok_user = channel["tiktok_username"]
+    min_age_days = int(channel.get("longform_min_age_days", 15))
+
+    # Age cutoff: video must have been posted on TikTok at least min_age_days ago.
+    cutoff_ts = int((datetime.now(timezone.utc) - timedelta(days=min_age_days)).timestamp())
+
+    # Check pending longform retries first.
+    retries = db.get_videos_for_retry(channel_id, date.today())
+    longform_retries = [r for r in retries if r.get("format_type") == "longform"
+                        or "longform" in str(r.get("error_message", ""))]
+    if longform_retries:
+        logger.info("[%s] Found %d longform retry(s) due", channel_id, len(longform_retries))
+        r = longform_retries[0]
+        return {
+            "id": r["tiktok_video_id"],
+            "url": r.get("tiktok_url"),
+            "title": r.get("tiktok_title"),
+            "timestamp": r.get("tiktok_timestamp"),
+        }
+
+    # Fetch full profile — need old videos so can't use the fast 50-video batch.
+    logger.info("[%s] tiered_split slot 2: fetching full TikTok profile @%s",
+                channel_id, tiktok_user)
+    all_videos = get_profile_videos(tiktok_user, end=None)
+    if all_videos is None:
+        raise TikTokUnreachableError(
+            f"TikTok profile @{tiktok_user} is unreachable after retries"
+        )
+
+    # Get video IDs already uploaded as longform (the only exclusion for slot 2).
+    already_longformed = db.get_longformed_video_ids(channel_id)
+
+    # Filter: must be old enough + not already longformed.
+    eligible = [
+        v for v in all_videos
+        if (v.get("timestamp") or 0) <= cutoff_ts
+        and v["id"] not in already_longformed
+    ]
+
+    # TikTok returns newest-first, so eligible[0] is the newest video ≥ min_age_days old.
+    if not eligible:
+        logger.info("[%s] No eligible longform videos found (all ≥%d-day-old videos already longformed)",
+                    channel_id, min_age_days)
+        return None
+
+    video = eligible[0]
+    logger.info("[%s] tiered_split slot 2: selected video %s | '%s' (age cutoff %d days)",
+                channel_id, video["id"], video.get("title", "")[:60], min_age_days)
+    db.record_video_seen(channel_id, video, format_type="longform")
+    return video
 
 
 def _parse_min_upload_date(min_date_str: Optional[str]) -> Optional[int]:
