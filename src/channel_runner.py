@@ -82,61 +82,90 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
         # Clean up any stale files from previous failed runs
         cleanup_stale_downloads(DOWNLOADS_DIR, max_age_days=7)
 
-        # Pick one video to upload this slot.
-        # trim_dual slot 2: may not need a fresh video (uses today's longform from DB).
-        # Still try to pick one in case slot 1 failed and self-heal is needed.
-        if upload_mode == "trim_dual" and slot == 2:
-            today_longform = db.get_todays_longform_video(channel_id)
-            if today_longform is not None:
-                video = None  # slot 2 will use today's longform — no fresh pick needed
+        # Pick a video and run it, with multi-candidate download fallback.
+        # If the chosen video can't be DOWNLOADED (e.g. TikTok IP-blocks that
+        # specific post), try the next eligible video so the slot still posts on
+        # time. The blocked video stays queued for retry on a later run, which
+        # gets a fresh runner IP. Profile listing already succeeded to reach here,
+        # so such a block is post-specific — a different video almost always
+        # downloads fine on the same run. Tune depth via max_download_candidates.
+        max_candidates = int(channel.get("max_download_candidates", 3))
+        tried_ids: set = set()
+
+        while True:
+            # ── Pick one video for this slot (excluding any already tried) ──
+            # trim_dual slot 2 may not need a fresh video (uses today's longform from DB).
+            if upload_mode == "trim_dual" and slot == 2:
+                today_longform = db.get_todays_longform_video(channel_id)
+                if today_longform is not None:
+                    video = None  # slot 2 will use today's longform — no fresh pick needed
+                else:
+                    # Slot 1 failed — pick a fresh video for self-heal
+                    video = _pick_next_video(channel, 1, upload_mode, exclude_ids=tried_ids)
+                    if video is None:
+                        logger.info("[%s] No unposted videos available for slot 2 self-heal", channel_id)
+                        db.finish_run(run_id, "no_content")
+                        result["status"] = "no_content"
+                        return result
             else:
-                # Slot 1 failed — pick a fresh video for self-heal
-                video = _pick_next_video(channel, 1, upload_mode)
+                video = _pick_next_video(channel, slot, upload_mode, exclude_ids=tried_ids)
                 if video is None:
-                    logger.info("[%s] No unposted videos available for slot 2 self-heal", channel_id)
+                    if tried_ids:
+                        # Ran out of fresh candidates after download failures. The
+                        # failed videos are already queued for retry; keep the
+                        # failed status set by the last attempt.
+                        logger.warning("[%s] All %d candidate video(s) failed to download this slot",
+                                       channel_id, len(tried_ids))
+                        break
+                    logger.info("[%s] No unposted videos available for slot %d", channel_id, slot)
                     db.finish_run(run_id, "no_content")
                     result["status"] = "no_content"
                     return result
-        else:
-            video = _pick_next_video(channel, slot, upload_mode)
-            if video is None:
-                logger.info("[%s] No unposted videos available for slot %d", channel_id, slot)
-                db.finish_run(run_id, "no_content")
-                result["status"] = "no_content"
-                return result
 
-        logger.info("[%s] Selected video: %s | '%s'", channel_id, video["id"], video.get("title", ""))
+            if video is not None:
+                tried_ids.add(video["id"])
+                logger.info("[%s] Selected video: %s | '%s'", channel_id, video["id"], video.get("title", ""))
 
-        # Dispatch to mode-specific runner.
-        # NOTE: vertical orientation is determined AFTER download (from the actual
-        # file via ffprobe) because extract_flat metadata often omits width/height.
-        if upload_mode == "dual":
-            _run_dual(channel, video, slot, run_id, dry_run, result)
-        elif upload_mode == "longform_only":
-            _run_longform_only(channel, video, slot, run_id, dry_run, result)
-        elif upload_mode == "split":
-            # Slot 1 → Short (9:16); Slot 2 → Longform (4:3 blurred-fill).
-            # Each slot picks a completely different TikTok video.
-            if slot == 2:
+            # Dispatch to mode-specific runner.
+            # NOTE: vertical orientation is determined AFTER download (from the actual
+            # file via ffprobe) because extract_flat metadata often omits width/height.
+            if upload_mode == "dual":
+                _run_dual(channel, video, slot, run_id, dry_run, result)
+            elif upload_mode == "longform_only":
                 _run_longform_only(channel, video, slot, run_id, dry_run, result)
+            elif upload_mode == "split":
+                # Slot 1 → Short (9:16); Slot 2 → Longform (4:3 blurred-fill).
+                # Each slot picks a completely different TikTok video.
+                if slot == 2:
+                    _run_longform_only(channel, video, slot, run_id, dry_run, result)
+                else:
+                    _run_short_only(channel, video, slot, run_id, dry_run, result)
+            elif upload_mode == "trim_dual":
+                # Slot 1 → upload original 3+ min video as longform.
+                # Slot 2 → trim same video to 2:59, upload as Short.
+                # Slot 2 is self-healing: if slot 1 failed, it runs slot 1 first then trims.
+                _run_trim_dual(channel, video, slot, run_id, dry_run, result)
+            elif upload_mode == "tiered_split":
+                # Slot 1 → newest Short (respects min_upload_date + min_backlog_for_slot1).
+                # Slot 2 → newest not-yet-longformed video ≥ longform_min_age_days old.
+                #          CAN re-use videos already uploaded as Short.
+                if slot == 2:
+                    _run_longform_only(channel, video, slot, run_id, dry_run, result)
+                else:
+                    _run_short_only(channel, video, slot, run_id, dry_run, result)
             else:
+                # short_only (default) — original behaviour
                 _run_short_only(channel, video, slot, run_id, dry_run, result)
-        elif upload_mode == "trim_dual":
-            # Slot 1 → upload original 3+ min video as longform.
-            # Slot 2 → trim same video to 2:59, upload as Short.
-            # Slot 2 is self-healing: if slot 1 failed, it runs slot 1 first then trims.
-            _run_trim_dual(channel, video, slot, run_id, dry_run, result)
-        elif upload_mode == "tiered_split":
-            # Slot 1 → newest Short (respects min_upload_date + min_backlog_for_slot1).
-            # Slot 2 → newest not-yet-longformed video ≥ longform_min_age_days old.
-            #          CAN re-use videos already uploaded as Short.
-            if slot == 2:
-                _run_longform_only(channel, video, slot, run_id, dry_run, result)
-            else:
-                _run_short_only(channel, video, slot, run_id, dry_run, result)
-        else:
-            # short_only (default) — original behaviour
-            _run_short_only(channel, video, slot, run_id, dry_run, result)
+
+            # Multi-candidate fallback: retry with a DIFFERENT video only when the
+            # download specifically failed and we still have candidates + budget.
+            err = (result.get("error") or "").lower()
+            if (result["status"] == "failed" and "download" in err
+                    and video is not None and len(tried_ids) < max_candidates):
+                logger.warning("[%s] Download failed for %s — trying next candidate (%d/%d)",
+                               channel_id, video["id"], len(tried_ids), max_candidates)
+                continue
+            break
 
     except TikTokUnreachableError as exc:
         error_msg = str(exc)
@@ -616,7 +645,8 @@ def _resolve_longform_title(channel: Dict[str, Any], video: Dict[str, Any]) -> s
 # ── Video selection ───────────────────────────────────────────────────────────
 
 def _pick_next_video(channel: Dict[str, Any], slot: int,
-                     upload_mode: str = "short_only") -> Optional[Dict[str, Any]]:
+                     upload_mode: str = "short_only",
+                     exclude_ids: Optional[set] = None) -> Optional[Dict[str, Any]]:
     """
     Priority order:
       1. Videos in pending_retry state that are due today (retries take priority)
@@ -626,13 +656,18 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
       min_upload_date       YYYY-MM-DD — ignore TikTok videos older than this date.
       min_backlog_for_slot1 int — slot 1 is skipped unless at least this many
                             unuploaded eligible videos exist.
+
+    exclude_ids: TikTok video IDs to skip — used by the multi-candidate download
+                 fallback so a video that just failed to download this run is not
+                 re-picked on the next attempt.
     """
     channel_id = channel["id"]
     today = date.today()
+    exclude_ids = exclude_ids or set()
 
     # tiered_split slot 2 has its own dedicated picker — handle it separately.
     if upload_mode == "tiered_split" and slot == 2:
-        return _pick_tiered_split_longform(channel)
+        return _pick_tiered_split_longform(channel, exclude_ids=exclude_ids)
 
     # Resolve optional date filter → Unix timestamp
     min_ts = _parse_min_upload_date(channel.get("min_upload_date"))
@@ -641,6 +676,7 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
     retries = db.get_videos_for_retry(channel_id, today)
     if min_ts is not None:
         retries = [r for r in retries if (r.get("tiktok_timestamp") or 0) >= min_ts]
+    retries = [r for r in retries if r["tiktok_video_id"] not in exclude_ids]
     if retries:
         logger.info("[%s] Found %d video(s) due for retry", channel_id, len(retries))
         return {
@@ -672,7 +708,8 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
     def _filter(vids):
         if min_ts is not None:
             vids = [v for v in vids if (v.get("timestamp") or 0) >= min_ts]
-        return [v for v in vids if v["id"] not in already_posted]
+        return [v for v in vids
+                if v["id"] not in already_posted and v["id"] not in exclude_ids]
 
     eligible = _filter(raw_batch)
 
@@ -729,7 +766,8 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
     return None
 
 
-def _pick_tiered_split_longform(channel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _pick_tiered_split_longform(channel: Dict[str, Any],
+                                exclude_ids: Optional[set] = None) -> Optional[Dict[str, Any]]:
     """
     Video picker for tiered_split slot 2 (Longform).
 
@@ -746,14 +784,17 @@ def _pick_tiered_split_longform(channel: Dict[str, Any]) -> Optional[Dict[str, A
     channel_id = channel["id"]
     tiktok_user = channel["tiktok_username"]
     min_age_days = int(channel.get("longform_min_age_days", 15))
+    exclude_ids = exclude_ids or set()
 
     # Age cutoff: video must have been posted on TikTok at least min_age_days ago.
     cutoff_ts = int((datetime.now(timezone.utc) - timedelta(days=min_age_days)).timestamp())
 
     # Check pending longform retries first.
     retries = db.get_videos_for_retry(channel_id, date.today())
-    longform_retries = [r for r in retries if r.get("format_type") == "longform"
-                        or "longform" in str(r.get("error_message", ""))]
+    longform_retries = [r for r in retries
+                        if (r.get("format_type") == "longform"
+                            or "longform" in str(r.get("error_message", "")))
+                        and r["tiktok_video_id"] not in exclude_ids]
     if longform_retries:
         logger.info("[%s] Found %d longform retry(s) due", channel_id, len(longform_retries))
         r = longform_retries[0]
@@ -776,11 +817,12 @@ def _pick_tiered_split_longform(channel: Dict[str, Any]) -> Optional[Dict[str, A
     # Get video IDs already uploaded as longform (the only exclusion for slot 2).
     already_longformed = db.get_longformed_video_ids(channel_id)
 
-    # Filter: must be old enough + not already longformed.
+    # Filter: must be old enough + not already longformed + not already tried this run.
     eligible = [
         v for v in all_videos
         if (v.get("timestamp") or 0) <= cutoff_ts
         and v["id"] not in already_longformed
+        and v["id"] not in exclude_ids
     ]
 
     # TikTok returns newest-first, so eligible[0] is the newest video ≥ min_age_days old.
