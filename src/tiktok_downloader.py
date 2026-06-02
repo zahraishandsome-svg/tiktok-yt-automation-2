@@ -79,6 +79,7 @@ def get_profile_videos(tiktok_username: str,
     if end is not None:
         ydl_opts["playlistend"] = end
     _inject_cookies(ydl_opts)
+    _inject_impersonate(ydl_opts)
 
     logger.info("Fetching video list from TikTok: @%s", tiktok_username)
     info = None
@@ -150,6 +151,7 @@ def download_video(video_url: str, video_id: str, output_dir: Path) -> Optional[
         "geo_bypass": True,
     }
     _inject_cookies(ydl_opts)
+    _inject_impersonate(ydl_opts)
 
     logger.info("Downloading TikTok video %s", video_id)
     try:
@@ -223,6 +225,26 @@ def _inject_cookies(ydl_opts: dict) -> None:
     if cookies_file and Path(cookies_file).exists():
         ydl_opts["cookiefile"] = cookies_file
         logger.debug("Using TikTok cookies from %s", cookies_file)
+
+
+def _inject_impersonate(ydl_opts: dict) -> None:
+    """
+    Enable browser impersonation so TikTok serves a parseable page.
+
+    Fixes the 'Unable to extract universal data for rehydration' error (and the
+    'attempting impersonation, but no impersonate target is available' warning)
+    that TikTok now triggers for non-browser HTTP clients. Requires the curl_cffi
+    backend (pinned in requirements.txt). Degrades silently if the backend or the
+    installed yt-dlp version doesn't support impersonation, so it can never break
+    a run on its own.
+    """
+    try:
+        import curl_cffi  # noqa: F401 — presence check for the impersonation backend
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+        logger.debug("TikTok browser impersonation enabled (chrome)")
+    except Exception as exc:
+        logger.debug("Impersonation unavailable, continuing without it: %s", exc)
 
 
 def _clean_title(title: str) -> str:
