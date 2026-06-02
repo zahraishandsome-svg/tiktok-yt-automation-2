@@ -3,7 +3,10 @@ yt-dlp>=2026.3.17
 # Browser-impersonation backend for yt-dlp — required so TikTok serves a parseable
 # page (fixes 'Unable to extract universal data for rehydration'). Used by
 # tiktok_downloader._inject_impersonate.
-curl_cffi>=0.7.0
+# MUST stay in yt-dlp's supported range: yt-dlp only registers curl_cffi
+# 0.5.10 or 0.10.x–0.14.x (see yt_dlp/networking/_curlcffi.py). 0.15+ is rejected
+# and silently yields ZERO impersonation targets, breaking TikTok fetches.
+curl_cffi>=0.10,<0.15
 google-api-python-client>=2.100.0
 google-auth-httplib2>=0.1.1
 google-auth-oauthlib>=1.1.0

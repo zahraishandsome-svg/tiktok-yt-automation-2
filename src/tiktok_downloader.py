@@ -89,6 +89,12 @@ def get_profile_videos(tiktok_username: str,
                 info = ydl.extract_info(url, download=False)
             break   # success — exit retry loop
         except Exception as exc:
+            # Safety net: if impersonation itself is the problem, disable it and
+            # retry immediately — impersonation must never be the cause of a miss.
+            if _is_impersonate_error(exc) and ydl_opts.pop("impersonate", None) is not None:
+                logger.warning("Impersonation failed for @%s — retrying without it",
+                               tiktok_username)
+                continue
             if attempt < _FETCH_RETRIES:
                 wait = _FETCH_RETRY_BASE_WAIT ** attempt
                 logger.warning(
@@ -154,18 +160,25 @@ def download_video(video_url: str, video_id: str, output_dir: Path) -> Optional[
     _inject_impersonate(ydl_opts)
 
     logger.info("Downloading TikTok video %s", video_id)
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            if not info:
-                logger.error("yt-dlp returned no info for %s", video_id)
-                return None
-    except yt_dlp.utils.DownloadError as exc:
-        logger.error("Download failed for %s: %s", video_id, exc)
-        return None
-    except Exception as exc:
-        logger.error("Unexpected error downloading %s: %s", video_id, exc)
-        return None
+    for impersonate_attempt in (True, False):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                if not info:
+                    logger.error("yt-dlp returned no info for %s", video_id)
+                    return None
+            break
+        except yt_dlp.utils.DownloadError as exc:
+            # If impersonation broke the download, drop it and try once more.
+            if (impersonate_attempt and _is_impersonate_error(exc)
+                    and ydl_opts.pop("impersonate", None) is not None):
+                logger.warning("Impersonation failed for %s — retrying without it", video_id)
+                continue
+            logger.error("Download failed for %s: %s", video_id, exc)
+            return None
+        except Exception as exc:
+            logger.error("Unexpected error downloading %s: %s", video_id, exc)
+            return None
 
     # Locate the output file (ext could be mp4 or webm)
     for ext in ("mp4", "webm", "mkv"):
@@ -227,24 +240,60 @@ def _inject_cookies(ydl_opts: dict) -> None:
         logger.debug("Using TikTok cookies from %s", cookies_file)
 
 
-def _inject_impersonate(ydl_opts: dict) -> None:
-    """
-    Enable browser impersonation so TikTok serves a parseable page.
+# Module-level cache for the resolved impersonate target.
+# Sentinel "unset" = not computed yet; None = no backend/target available.
+_IMPERSONATE_TARGET = "unset"
 
-    Fixes the 'Unable to extract universal data for rehydration' error (and the
-    'attempting impersonation, but no impersonate target is available' warning)
-    that TikTok now triggers for non-browser HTTP clients. Requires the curl_cffi
-    backend (pinned in requirements.txt). Degrades silently if the backend or the
-    installed yt-dlp version doesn't support impersonation, so it can never break
-    a run on its own.
+
+def _resolve_impersonate_target():
     """
+    Return a concrete, AVAILABLE ImpersonateTarget (prefer Chrome), or None.
+
+    We enumerate the targets yt-dlp actually has registered for the installed
+    curl_cffi backend instead of guessing a name like "chrome" — guessing fails
+    hard at request time with 'Impersonate target X is not available' when the
+    backend exposes only versioned names (e.g. chrome136). If curl_cffi is the
+    wrong version (yt-dlp only supports 0.5.10 / 0.10.x–0.14.x) the registered
+    list is empty and we return None so callers run without impersonation rather
+    than crashing. Result is cached — enumeration builds a throwaway YoutubeDL.
+    """
+    global _IMPERSONATE_TARGET
+    if _IMPERSONATE_TARGET != "unset":
+        return _IMPERSONATE_TARGET
+    target = None
     try:
         import curl_cffi  # noqa: F401 — presence check for the impersonation backend
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
-        logger.debug("TikTok browser impersonation enabled (chrome)")
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            available = [t for (t, _rh) in ydl._get_available_impersonate_targets()]
+        if available:
+            chrome = [t for t in available
+                      if (getattr(t, "client", "") or "").lower().startswith("chrome")]
+            target = (chrome or available)[0]
     except Exception as exc:
-        logger.debug("Impersonation unavailable, continuing without it: %s", exc)
+        logger.debug("Could not resolve impersonate target: %s", exc)
+        target = None
+    _IMPERSONATE_TARGET = target
+    logger.info("TikTok impersonation: %s",
+                target if target is not None else "disabled (no compatible backend)")
+    return target
+
+
+def _inject_impersonate(ydl_opts: dict) -> None:
+    """
+    Add an available browser-impersonation target to yt-dlp opts.
+
+    Fixes 'Unable to extract universal data for rehydration' / 'no impersonate
+    target available' that TikTok triggers for non-browser clients. Safe no-op if
+    no compatible target exists.
+    """
+    target = _resolve_impersonate_target()
+    if target is not None:
+        ydl_opts["impersonate"] = target
+
+
+def _is_impersonate_error(exc: Exception) -> bool:
+    """True if an exception looks like an impersonation-target failure."""
+    return "impersonate" in str(exc).lower()
 
 
 def _clean_title(title: str) -> str:
