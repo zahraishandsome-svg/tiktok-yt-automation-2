@@ -107,6 +107,26 @@ def get_video_dimensions(path: Path) -> tuple:
     return (0, 0)
 
 
+def get_video_duration(path: Path) -> float:
+    """
+    Return the video's duration in seconds (float), or 0.0 if it can't be probed.
+    Used by the longform min-duration gate (longform_min_seconds).
+    """
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return float(r.stdout.strip())
+        except Exception as exc:
+            logger.debug("[converter] duration probe error: %s", exc)
+    return 0.0
+
+
 def is_vertical(path: Path) -> bool:
     """
     Return True if the video is portrait/vertical (height > width).

@@ -32,7 +32,8 @@ from .tiktok_downloader import (
     is_short_video, cleanup_download, cleanup_stale_downloads, _PROFILE_BATCH,
 )
 from .youtube_uploader import get_authenticated_client, upload_video
-from .video_converter import convert_to_4_3_blurred, trim_video, is_ffmpeg_available, is_vertical as _file_is_vertical
+from .video_converter import (convert_to_4_3_blurred, trim_video, is_ffmpeg_available,
+                              is_vertical as _file_is_vertical, get_video_duration)
 
 logger = logging.getLogger(__name__)
 
@@ -157,13 +158,16 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
                 # short_only (default) — original behaviour
                 _run_short_only(channel, video, slot, run_id, dry_run, result)
 
-            # Multi-candidate fallback: retry with a DIFFERENT video only when the
-            # download specifically failed and we still have candidates + budget.
+            # Multi-candidate fallback: retry with a DIFFERENT video when either the
+            # download failed OR the runner asked to skip this one (e.g. longform
+            # below longform_min_seconds), while candidates + budget remain.
             err = (result.get("error") or "").lower()
-            if (result["status"] == "failed" and "download" in err
+            wants_next = result.pop("retry_next_candidate", False)
+            if (result["status"] == "failed" and (wants_next or "download" in err)
                     and video is not None and len(tried_ids) < max_candidates):
-                logger.warning("[%s] Download failed for %s — trying next candidate (%d/%d)",
-                               channel_id, video["id"], len(tried_ids), max_candidates)
+                reason = "too short" if wants_next else "download failed"
+                logger.warning("[%s] %s for %s — trying next candidate (%d/%d)",
+                               channel_id, reason, video["id"], len(tried_ids), max_candidates)
                 continue
             break
 
@@ -269,6 +273,24 @@ def _run_longform_only(channel, video, slot, run_id, dry_run, result):
         result["status"] = "failed"
         result["error"] = "Download failed"
         return
+
+    # Minimum-duration gate (e.g. ch3 longform_min_seconds: 60). Longform is only
+    # worthwhile above a threshold — skip clips shorter than that, mark them so they
+    # are never re-tried, and signal the orchestrator to try the next candidate.
+    min_secs = channel.get("longform_min_seconds")
+    if min_secs and not dry_run:
+        duration = get_video_duration(local_file)
+        if duration and duration < float(min_secs):
+            logger.info("[%s] Longform candidate %s is %.0fs (< %ss minimum) — skipping",
+                        channel_id, video["id"], duration, min_secs)
+            db.mark_skipped(channel_id, video, reason=f"too short ({duration:.0f}s)",
+                            format_type="longform")
+            cleanup_download(local_file)
+            db.finish_run(run_id, "skipped")
+            result["status"] = "failed"
+            result["error"] = f"too short ({duration:.0f}s)"
+            result["retry_next_candidate"] = True
+            return
 
     # Probe orientation from the actual file (reliable even when metadata is absent)
     vertical = _file_is_vertical(local_file) if not dry_run else (

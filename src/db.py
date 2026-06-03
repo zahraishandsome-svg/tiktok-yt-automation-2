@@ -346,6 +346,31 @@ def delete_todays_success_runs(channel_id: str) -> int:
     return deleted
 
 
+def mark_skipped(channel_id: str, video: Dict[str, Any],
+                 reason: str = "", format_type: str = "short") -> None:
+    """
+    Mark a video's format row as 'skipped' so it is never selected or retried again.
+    Used to permanently skip longform candidates below the minimum duration
+    (longform_min_seconds) so the slot stops re-evaluating the same short clips.
+    """
+    now = datetime.utcnow().isoformat()
+    conn = get_connection()
+    with conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO posted_videos
+                (channel_id, tiktok_video_id, format_type,
+                 tiktok_url, tiktok_title, tiktok_timestamp, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'skipped')
+        """, (channel_id, video["id"], format_type,
+              video.get("url"), video.get("title"), video.get("timestamp")))
+        conn.execute("""
+            UPDATE posted_videos
+            SET status = 'skipped', error_message = ?, updated_at = ?
+            WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
+        """, (reason, now, channel_id, video["id"], format_type))
+    conn.close()
+
+
 def mark_retry(channel_id: str, tiktok_video_id: str,
                error_message: str, next_retry_date: date, max_retries: int,
                format_type: str = "short") -> None:
