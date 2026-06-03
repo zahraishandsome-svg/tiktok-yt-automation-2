@@ -115,12 +115,21 @@ def get_profile_videos(tiktok_username: str,
         return []   # ← accessible but empty
 
     videos = []
+    photo_skipped = 0
     for entry in info.get("entries") or []:
         if not entry:
             continue
+        url = entry.get("url") or entry.get("webpage_url") or ""
+        # TikTok photo/slideshow posts use a /photo/ URL and have NO downloadable video
+        # stream — yt-dlp errors on them ("Unexpected response from webpage request").
+        # Drop them at the source so they never get selected, jam a slot, or burn
+        # retries. Applies to every channel automatically.
+        if "/photo/" in url:
+            photo_skipped += 1
+            continue
         videos.append({
             "id": entry.get("id"),
-            "url": entry.get("url") or entry.get("webpage_url"),
+            "url": url,
             "title": _clean_title(entry.get("title") or ""),
             "description": entry.get("description") or "",
             "timestamp": entry.get("timestamp"),        # Unix epoch
@@ -131,7 +140,10 @@ def get_profile_videos(tiktok_username: str,
 
     # Newest first — this is the posting priority order
     videos.sort(key=lambda v: v.get("timestamp") or 0, reverse=True)
-    logger.info("Found %d videos on @%s profile", len(videos), tiktok_username)
+    if photo_skipped:
+        logger.info("Skipped %d photo/slideshow post(s) on @%s (not downloadable as video)",
+                    photo_skipped, tiktok_username)
+    logger.info("Found %d video(s) on @%s profile", len(videos), tiktok_username)
     return videos
 
 
