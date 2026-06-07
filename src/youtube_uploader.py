@@ -203,18 +203,32 @@ def _save_token(creds: Credentials, token_file: Path) -> None:
     logger.debug("Token saved to %s", token_file)
 
 
+def _sanitize_yt_text(text: str) -> str:
+    """
+    Remove characters YouTube rejects in title/description metadata.
+    YouTube's API rejects angle brackets ('<' and '>') with
+    'invalid video title/description' — replace them with safe lookalikes
+    so text like '<3' stays readable instead of being dropped.
+    """
+    if not text:
+        return ""
+    return text.replace("<", "‹").replace(">", "›")
+
+
 def _truncate_title(title: str) -> str:
-    """Trim title to YouTube's 100-char limit, appending '…' if cut."""
-    title = title.strip()
+    """Sanitize + trim title to YouTube's 100-char limit. Never returns empty."""
+    title = _sanitize_yt_text(title).strip()
+    if not title:
+        title = "Video"   # last-resort fallback; _resolve_title normally prevents this
     if len(title) > YT_TITLE_LIMIT:
         return title[: YT_TITLE_LIMIT - 1] + "…"
     return title
 
 
 def _build_description(description: str, footer: str) -> str:
-    parts = [description.strip()]
+    parts = [_sanitize_yt_text(description).strip()]
     if footer and footer.strip():
-        parts.append("\n\n" + footer.strip())
+        parts.append("\n\n" + _sanitize_yt_text(footer).strip())
     result = "".join(parts)
     if len(result) > YT_DESCRIPTION_LIMIT:
         result = result[: YT_DESCRIPTION_LIMIT - 3] + "..."
