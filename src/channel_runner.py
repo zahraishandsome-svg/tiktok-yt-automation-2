@@ -956,49 +956,12 @@ def _upload_video(channel: Dict[str, Any], video: Dict[str, Any],
 
 def _get_publish_at(channel: Dict[str, Any], slot: int) -> Optional[str]:
     """
-    Calculate the UTC publish time for this slot using slot_publish_times_utc config.
-    Returns an ISO 8601 UTC string (e.g. '2026-05-26T15:00:00Z').
-    Video uploads as Private and YouTube makes it Public at exactly that time,
-    regardless of when GitHub Actions actually ran the workflow.
-
-    GitHub Actions cron delays can be anywhere from minutes to 10+ hours.
-    To handle this gracefully:
-      - If target time is still in the future (>15 min): schedule for today
-      - If target time is within 15 min: schedule for today (YouTube minimum is 5 min)
-      - If target time already passed today: schedule for TOMORROW at the same time
-        (never publish immediately — always respect the configured schedule)
+    Always returns None — videos upload directly as Public.
+    cron-job.org fires at the target slot_publish_times_utc time; the video
+    goes live immediately when the workflow runs so YouTube's fresh-content
+    boost fires at the right moment rather than during a private buffer window.
     """
-    times = channel.get("slot_publish_times_utc") or {}
-    # Accept both int and string keys from YAML
-    time_str = times.get(slot) or times.get(str(slot))
-    if not time_str:
-        return None
-
-    try:
-        h, m = map(int, str(time_str).split(":"))
-    except (ValueError, AttributeError):
-        logger.warning("[%s] Invalid slot_publish_times_utc value: %r", channel["id"], time_str)
-        return None
-
-    now = datetime.now(timezone.utc)
-    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    delta_seconds = (target - now).total_seconds()
-
-    if delta_seconds < 0:
-        # Target already passed today (GitHub cron ran late) — publish immediately.
-        logger.info(
-            "[%s] Slot %d: %02d:%02dZ already passed today (GitHub cron delay) — "
-            "publishing immediately",
-            channel["id"], slot, h, m,
-        )
-        return None
-
-    logger.info(
-        "[%s] Slot %d will publish at %s (%d min from now)",
-        channel["id"], slot, target.strftime("%Y-%m-%dT%H:%M:%SZ"), int(delta_seconds / 60),
-    )
-    publish_at = target.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return publish_at
+    return None
 
 
 def _handle_upload_failure(channel: Dict[str, Any], video: Dict[str, Any],
