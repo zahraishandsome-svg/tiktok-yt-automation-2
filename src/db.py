@@ -1,6 +1,6 @@
-"""
+﻿"""
 SQLite wrapper. One database, multi-channel schema.
-All state tracking lives here — nothing is derived from filenames or folders.
+All state tracking lives here â€” nothing is derived from filenames or folders.
 """
 
 import sqlite3
@@ -99,13 +99,13 @@ def init_db() -> None:
 def _migrate_add_format_type(conn: sqlite3.Connection) -> None:
     """
     One-time migration: add format_type column + update PRIMARY KEY.
-    Safe to call repeatedly — no-ops if already migrated.
+    Safe to call repeatedly â€” no-ops if already migrated.
     """
     cols = [row[1] for row in conn.execute("PRAGMA table_info(posted_videos)")]
     if "format_type" in cols:
         return  # already done
 
-    logger.info("Migrating posted_videos: adding format_type column…")
+    logger.info("Migrating posted_videos: adding format_type columnâ€¦")
     conn.executescript("""
         CREATE TABLE posted_videos_new (
             channel_id          TEXT NOT NULL,
@@ -143,7 +143,7 @@ def _migrate_add_format_type(conn: sqlite3.Connection) -> None:
     logger.info("Migration complete.")
 
 
-# ── Channel registry ──────────────────────────────────────────────────────────
+# â”€â”€ Channel registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def upsert_channel(channel_cfg: Dict[str, Any]) -> None:
     conn = get_connection()
@@ -166,18 +166,18 @@ def upsert_channel(channel_cfg: Dict[str, Any]) -> None:
     conn.close()
 
 
-# ── Video state ───────────────────────────────────────────────────────────────
+# â”€â”€ Video state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def get_posted_video_ids(channel_id: str, upload_mode: str = "short_only") -> set:
     """
     Returns video IDs that must NOT be selected for a new upload.
 
     upload_mode determines which format(s) must be "done" for a video to be skipped:
-      short_only    — skip if format_type='short' has a done-status (legacy, unchanged)
-      longform_only — skip if ANY format has a done-status. This means videos already
+      short_only    â€” skip if format_type='short' has a done-status (legacy, unchanged)
+      longform_only â€” skip if ANY format has a done-status. This means videos already
                       uploaded as Shorts (short_only mode) are not re-uploaded when the
                       channel switches to longform_only.
-      dual          — same as longform_only: skip if ANY format has a done-status.
+      dual          â€” same as longform_only: skip if ANY format has a done-status.
 
     Done-statuses: uploaded | failed_permanent | skipped | pending_retry
     ('pending_retry' is included so failed videos go through the retry path,
@@ -197,7 +197,7 @@ def get_posted_video_ids(channel_id: str, upload_mode: str = "short_only") -> se
               AND status IN ('uploaded', 'failed_permanent', 'skipped', 'pending_retry')
         """, (channel_id,)).fetchall()
 
-    else:  # short_only (default — preserves exact legacy behaviour)
+    else:  # short_only (default â€” preserves exact legacy behaviour)
         rows = conn.execute("""
             SELECT tiktok_video_id FROM posted_videos
             WHERE channel_id = ? AND format_type = 'short'
@@ -269,7 +269,7 @@ def mark_uploaded(channel_id: str, tiktok_video_id: str, youtube_video_id: str,
     """
     Upsert a (channel, video, format) triple as uploaded.
 
-    Uses INSERT … ON CONFLICT DO UPDATE so it works whether or not
+    Uses INSERT â€¦ ON CONFLICT DO UPDATE so it works whether or not
     record_video_seen() was previously called with the same format_type.
     This is critical for longform_only/dual modes where the 'longform' row
     may not have been pre-inserted by record_video_seen().
@@ -320,7 +320,7 @@ def mark_deleted_repost_pending(channel_id: str, tiktok_video_id: str,
             SET status = 'deleted_repost_pending',
                 youtube_video_id = NULL,
                 posted_at = NULL,
-                error_message = 'YouTube video deleted — repost pending',
+                error_message = 'YouTube video deleted â€” repost pending',
                 updated_at = ?
             WHERE channel_id = ? AND tiktok_video_id = ? AND format_type = ?
         """, (datetime.utcnow().isoformat(), channel_id, tiktok_video_id, format_type))
@@ -412,7 +412,7 @@ def mark_retry(channel_id: str, tiktok_video_id: str,
     conn.close()
 
 
-# ── Run tracking ──────────────────────────────────────────────────────────────
+# â”€â”€ Run tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def start_run(channel_id: str, slot: int) -> int:
     """Insert a run record, return its ID."""
@@ -456,10 +456,10 @@ def get_todays_run_summary() -> List[Dict]:
     Return exactly one row per channel per slot for today's runs.
 
     Two bugs fixed vs. the naive query:
-      1. Deduplication — if a slot ran more than once today (e.g. a local run
+      1. Deduplication â€” if a slot ran more than once today (e.g. a local run
          followed by the scheduled GitHub Actions run), only the most recent
          run (highest id) is returned.
-      2. Per-slot video URL — the subquery now matches posted_at to the
+      2. Per-slot video URL â€” the subquery now matches posted_at to the
          specific run's started_at/completed_at window so slot 1 and slot 2
          never share the same video URL in the summary.
 
@@ -499,7 +499,7 @@ def get_todays_run_summary() -> List[Dict]:
                    LIMIT 1
                ) AS tiktok_title
         FROM runs r
-        WHERE r.run_date = date('now')
+        WHERE r.started_at >= datetime('now', '-20 hours')
           AND r.status != 'running'
           AND r.id = (
               SELECT COALESCE(
@@ -529,7 +529,7 @@ def get_todays_run_summary() -> List[Dict]:
 def get_longformed_video_ids(channel_id: str) -> set:
     """
     Returns video IDs already uploaded as longform for this channel.
-    Used by tiered_split slot 2 — only excludes longform uploads,
+    Used by tiered_split slot 2 â€” only excludes longform uploads,
     allowing videos already uploaded as Short to be re-used as Longform.
     """
     conn = get_connection()

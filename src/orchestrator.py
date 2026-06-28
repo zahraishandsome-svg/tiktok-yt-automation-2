@@ -1,4 +1,4 @@
-"""
+﻿"""
 Loops through all enabled channels and runs channel_runner for each.
 Error isolation: if one channel fails, the others still run.
 Aggregates results and triggers Discord notification on any failure.
@@ -34,7 +34,7 @@ def run_all_channels(
             return []
 
     if not channels:
-        logger.warning("No enabled channels found — nothing to do")
+        logger.warning("No enabled channels found â€” nothing to do")
         return []
 
     logger.info("Running slot %d | channels=%d | dry_run=%s", slot, len(channels), dry_run)
@@ -44,7 +44,7 @@ def run_all_channels(
 
     for channel in channels:
         channel_id = channel["id"]
-        logger.info("── Starting channel: %s (@%s) ──", channel_id, channel["tiktok_username"])
+        logger.info("â”€â”€ Starting channel: %s (@%s) â”€â”€", channel_id, channel["tiktok_username"])
         try:
             result = run_channel(channel=channel, slot=slot, dry_run=dry_run)
             results.append(result)
@@ -76,7 +76,7 @@ def run_all_channels(
     webhook_url = config.get("discord_webhook_url", "")
     if webhook_url:
         if failures:
-            send_failure_alert(webhook_url=webhook_url, failures=failures, slot=slot)
+            None  # instant failure alerts disabled; failures appear in the daily summary
 
     _log_summary(results)
     return results
@@ -89,10 +89,10 @@ def _log_summary(results: List[Dict[str, Any]]) -> None:
     no_content = [r for r in results if r["status"] == "no_content"]
 
     logger.info(
-        "── Summary: %d success | %d failed | %d skipped | %d no_content ──",
+        "â”€â”€ Summary: %d success | %d failed | %d skipped | %d no_content â”€â”€",
         len(success), len(failed), len(skipped), len(no_content),
     )
     for r in success:
-        logger.info("  ✓ %s → %s", r["channel_id"], r.get("youtube_url"))
+        logger.info("  âœ“ %s â†’ %s", r["channel_id"], r.get("youtube_url"))
     for r in failed:
-        logger.error("  ✗ %s → %s", r["channel_id"], r.get("error"))
+        logger.error("  âœ— %s â†’ %s", r["channel_id"], r.get("error"))
