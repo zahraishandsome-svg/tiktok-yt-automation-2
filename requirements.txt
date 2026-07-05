@@ -1,5 +1,5 @@
 # Core
-yt-dlp>=2026.6.9
+yt-dlp>=2026.7.4
 # Browser-impersonation backend for yt-dlp — required so TikTok serves a parseable
 # page (fixes 'Unable to extract universal data for rehydration'). Used by
 # tiktok_downloader._inject_impersonate.
