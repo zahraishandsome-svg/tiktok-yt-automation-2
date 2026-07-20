@@ -1,7 +1,7 @@
 """
 TikTok scraping and downloading via yt-dlp.
 Watermark removal is handled by preferring the 'download_addr' format over 'play_addr'.
-Never raises — returns None on failure so channel_runner can decide retry logic.
+Never raises â€” returns None on failure so channel_runner can decide retry logic.
 """
 
 import logging
@@ -18,40 +18,46 @@ logger = logging.getLogger(__name__)
 # Format selector that picks the clean (non-watermarked) stream.
 #
 # yt-dlp TikTok extractor exposes two format families:
-#   format_id^=play     → play_addr / play_addr_h264 / play_addr_bytevc1 / play
-#                          These are the raw stream URLs — NO watermark.
-#   format_id^=download → download_addr / download
-#                          These are TikTok's "Save Video" URLs — explicitly
+#   format_id^=play     â†’ play_addr / play_addr_h264 / play_addr_bytevc1 / play
+#                          These are the raw stream URLs â€” NO watermark.
+#   format_id^=download â†’ download_addr / download
+#                          These are TikTok's "Save Video" URLs â€” explicitly
 #                          labeled 'watermarked' in yt-dlp and given preference: -2.
 #
 # Root cause of historical watermark bug: the old selector used format_id^=download
 # which yt-dlp EXPLICITLY marks as watermarked (format_note='watermarked', pref=-2).
 # Japanese channels were unaffected because their creators have TikTok downloads
-# disabled → no 'download' format exists for them → selector fell through to
-# best[ext=mp4] → picked 'play' (clean). Western creators (Raven, Aivanna) have
-# downloads enabled → 'download' format was found first → watermarked.
+# disabled â†’ no 'download' format exists for them â†’ selector fell through to
+# best[ext=mp4] â†’ picked 'play' (clean). Western creators (Raven, Aivanna) have
+# downloads enabled â†’ 'download' format was found first â†’ watermarked.
 #
 # Fix: always prefer format_id^=play. Falls back to best[ext=mp4] (which also
 # picks play over download due to play's higher preference score).
 #
 # Priority order:
 #   1. Clean video-only + separate audio (ideal, merges via ffmpeg)
-#   2. Clean combined mp4 (audio+video — used when no separate audio stream)
+#   2. Clean combined mp4 (audio+video â€” used when no separate audio stream)
 #   3. Any clean combined format (non-mp4 fallback)
-#   4. Best mp4 (no explicit filter — play still wins via preference score)
+#   4. Best mp4 (no explicit filter â€” play still wins via preference score)
 #   5. Absolute fallback
+# EVERY fallback requires vcodec!=none. Without that, a TikTok photo/slideshow
+# post (which has only an audio track, and is sometimes served under a /video/
+# URL so the /photo/ filter misses it) falls through to the audio-only format:
+# yt-dlp then "succeeds" writing a .mp3 and the caller finds no video file.
+# Requiring a video stream makes such posts fail cleanly so the candidate loop
+# can skip to the next video.
 _WATERMARK_FREE_FORMAT = (
     "bestvideo[format_id^=play][ext=mp4]+bestaudio"
-    "/best[format_id^=play][ext=mp4]"
-    "/best[format_id^=play]"
-    "/best[ext=mp4]"
-    "/best"
+    "/best[format_id^=play][ext=mp4][vcodec!=none]"
+    "/best[format_id^=play][vcodec!=none]"
+    "/best[ext=mp4][vcodec!=none]"
+    "/best[vcodec!=none]"
 )
 
 
 _FETCH_RETRIES = 3
 _FETCH_RETRY_BASE_WAIT = 2   # seconds, doubles each attempt
-_PROFILE_BATCH = 50          # default fetch limit — covers most active channels
+_PROFILE_BATCH = 50          # default fetch limit â€” covers most active channels
 
 
 def get_profile_videos(tiktok_username: str,
@@ -61,12 +67,12 @@ def get_profile_videos(tiktok_username: str,
     Returns:
       - List of video dicts sorted newest-first on success (may be empty if no videos)
       - None if the profile could not be fetched after all retries (network/TikTok error)
-        — callers must treat None as an alert-worthy failure, not just "no content"
-    Does NOT download — just lists metadata.
+        â€” callers must treat None as an alert-worthy failure, not just "no content"
+    Does NOT download â€” just lists metadata.
 
     Args:
       end: Stop after this many videos (newest-first). Pass None to fetch all.
-           Defaults to _PROFILE_BATCH (50) — callers fall back to None when needed.
+           Defaults to _PROFILE_BATCH (50) â€” callers fall back to None when needed.
     """
     url = f"https://www.tiktok.com/@{tiktok_username}"
     ydl_opts = {
@@ -87,12 +93,12 @@ def get_profile_videos(tiktok_username: str,
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-            break   # success — exit retry loop
+            break   # success â€” exit retry loop
         except Exception as exc:
             # Safety net: if impersonation itself is the problem, disable it and
-            # retry immediately — impersonation must never be the cause of a miss.
+            # retry immediately â€” impersonation must never be the cause of a miss.
             if _is_impersonate_error(exc) and ydl_opts.pop("impersonate", None) is not None:
-                logger.warning("Impersonation failed for @%s — retrying without it",
+                logger.warning("Impersonation failed for @%s â€” retrying without it",
                                tiktok_username)
                 continue
             if attempt < _FETCH_RETRIES:
@@ -104,15 +110,15 @@ def get_profile_videos(tiktok_username: str,
                 time.sleep(wait)
             else:
                 logger.error(
-                    "TikTok fetch failed for @%s after %d attempts — profile may be "
+                    "TikTok fetch failed for @%s after %d attempts â€” profile may be "
                     "blocked or unreachable: %s",
                     tiktok_username, _FETCH_RETRIES, exc,
                 )
-                return None   # ← distinct from empty profile
+                return None   # â† distinct from empty profile
 
     if not info or "entries" not in info:
-        logger.warning("No entries returned for @%s — profile is empty or private", tiktok_username)
-        return []   # ← accessible but empty
+        logger.warning("No entries returned for @%s â€” profile is empty or private", tiktok_username)
+        return []   # â† accessible but empty
 
     videos = []
     photo_skipped = 0
@@ -121,7 +127,7 @@ def get_profile_videos(tiktok_username: str,
             continue
         url = entry.get("url") or entry.get("webpage_url") or ""
         # TikTok photo/slideshow posts use a /photo/ URL and have NO downloadable video
-        # stream — yt-dlp errors on them ("Unexpected response from webpage request").
+        # stream â€” yt-dlp errors on them ("Unexpected response from webpage request").
         # Drop them at the source so they never get selected, jam a slot, or burn
         # retries. Applies to every channel automatically.
         if "/photo/" in url:
@@ -138,7 +144,7 @@ def get_profile_videos(tiktok_username: str,
             "height": entry.get("height"),
         })
 
-    # Newest first — this is the posting priority order
+    # Newest first â€” this is the posting priority order
     videos.sort(key=lambda v: v.get("timestamp") or 0, reverse=True)
     if photo_skipped:
         logger.info("Skipped %d photo/slideshow post(s) on @%s (not downloadable as video)",
@@ -184,7 +190,7 @@ def download_video(video_url: str, video_id: str, output_dir: Path) -> Optional[
             # If impersonation broke the download, drop it and try once more.
             if (impersonate_attempt and _is_impersonate_error(exc)
                     and ydl_opts.pop("impersonate", None) is not None):
-                logger.warning("Impersonation failed for %s — retrying without it", video_id)
+                logger.warning("Impersonation failed for %s â€” retrying without it", video_id)
                 continue
             logger.error("Download failed for %s: %s", video_id, exc)
             return None
@@ -262,19 +268,19 @@ def _resolve_impersonate_target():
     Return a concrete, AVAILABLE ImpersonateTarget (prefer Chrome), or None.
 
     We enumerate the targets yt-dlp actually has registered for the installed
-    curl_cffi backend instead of guessing a name like "chrome" — guessing fails
+    curl_cffi backend instead of guessing a name like "chrome" â€” guessing fails
     hard at request time with 'Impersonate target X is not available' when the
     backend exposes only versioned names (e.g. chrome136). If curl_cffi is the
-    wrong version (yt-dlp only supports 0.5.10 / 0.10.x–0.14.x) the registered
+    wrong version (yt-dlp only supports 0.5.10 / 0.10.xâ€“0.14.x) the registered
     list is empty and we return None so callers run without impersonation rather
-    than crashing. Result is cached — enumeration builds a throwaway YoutubeDL.
+    than crashing. Result is cached â€” enumeration builds a throwaway YoutubeDL.
     """
     global _IMPERSONATE_TARGET
     if _IMPERSONATE_TARGET != "unset":
         return _IMPERSONATE_TARGET
     target = None
     try:
-        import curl_cffi  # noqa: F401 — presence check for the impersonation backend
+        import curl_cffi  # noqa: F401 â€” presence check for the impersonation backend
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
             available = [t for (t, _rh) in ydl._get_available_impersonate_targets()]
         if available:
