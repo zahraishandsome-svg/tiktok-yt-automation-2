@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
 
-VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split", "trim_dual", "tiered_split"}
+VALID_UPLOAD_MODES = {"short_only", "dual", "longform_only", "split", "trim_dual", "tiered_split", "popular_split"}
 
 
 class TikTokUnreachableError(Exception):
@@ -154,6 +154,9 @@ def run_channel(channel: Dict[str, Any], slot: int, dry_run: bool = False) -> Di
                     _run_longform_only(channel, video, slot, run_id, dry_run, result)
                 else:
                     _run_short_only(channel, video, slot, run_id, dry_run, result)
+            elif upload_mode == "popular_split":
+                # Both slots upload a Short. Slot 1 = newest, slot 2 = most-viewed.
+                _run_short_only(channel, video, slot, run_id, dry_run, result)
             else:
                 # short_only (default) — original behaviour
                 _run_short_only(channel, video, slot, run_id, dry_run, result)
@@ -691,6 +694,10 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
     if upload_mode == "tiered_split" and slot == 2:
         return _pick_tiered_split_longform(channel, exclude_ids=exclude_ids)
 
+    # popular_split slot 2 = the most-VIEWED unposted TikTok (slot 1 stays newest).
+    if upload_mode == "popular_split" and slot == 2:
+        return _pick_most_popular(channel, exclude_ids=exclude_ids)
+
     # Resolve optional date filter → Unix timestamp
     min_ts = _parse_min_upload_date(channel.get("min_upload_date"))
 
@@ -786,6 +793,44 @@ def _pick_next_video(channel: Dict[str, Any], slot: int,
         return video
 
     return None
+
+
+def _pick_most_popular(channel: Dict[str, Any],
+                       exclude_ids: Optional[set] = None) -> Optional[Dict[str, Any]]:
+    """
+    Pick the most-VIEWED unposted TikTok across the WHOLE profile (not just the
+    newest batch — the top video may be old). Used by popular_split slot 2.
+    Uploaded as a Short, same as short_only. Respects min_upload_date and
+    excludes videos already posted (any as a 'short') plus exclude_ids.
+    """
+    channel_id = channel["id"]
+    exclude_ids = exclude_ids or set()
+    tiktok_user = channel["tiktok_username"]
+
+    all_videos = get_profile_videos(tiktok_user, end=None)   # full profile
+    if all_videos is None:
+        raise TikTokUnreachableError(
+            f"TikTok profile @{tiktok_user} is unreachable after retries"
+        )
+    if not all_videos:
+        return None
+
+    min_ts = _parse_min_upload_date(channel.get("min_upload_date"))
+    if min_ts is not None:
+        all_videos = [v for v in all_videos if (v.get("timestamp") or 0) >= min_ts]
+
+    already_posted = db.get_posted_video_ids(channel_id, upload_mode="popular_split")
+    eligible = [v for v in all_videos
+                if v["id"] not in already_posted and v["id"] not in exclude_ids]
+    if not eligible:
+        return None
+
+    eligible.sort(key=lambda v: (v.get("view_count") or 0), reverse=True)
+    video = eligible[0]
+    db.record_video_seen(channel_id, video, format_type="short")
+    logger.info("[%s] Slot 2 most-popular pick: %s (%s views) | '%s'",
+                channel_id, video["id"], video.get("view_count"), video.get("title", ""))
+    return video
 
 
 def _pick_tiered_split_longform(channel: Dict[str, Any],

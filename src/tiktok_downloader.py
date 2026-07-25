@@ -140,6 +140,7 @@ def get_profile_videos(tiktok_username: str,
             "description": entry.get("description") or "",
             "timestamp": entry.get("timestamp"),        # Unix epoch
             "duration": entry.get("duration"),          # seconds
+            "view_count": entry.get("view_count"),      # TikTok play count (popularity)
             "width": entry.get("width"),
             "height": entry.get("height"),
         })
