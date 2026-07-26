@@ -7,6 +7,7 @@ Never raises â€” returns None on failure so channel_runner can decide retry
 import logging
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -50,8 +51,19 @@ _WATERMARK_FREE_FORMAT = (
     "bestvideo[format_id^=play][ext=mp4]+bestaudio"
     "/best[format_id^=play][ext=mp4][vcodec!=none]"
     "/best[format_id^=play][vcodec!=none]"
+    # TikTok's bytevc1/h265 renditions advertise acodec=aac but download VIDEO-ONLY,
+    # which silently produced muted uploads. The h264 variants do carry audio and are
+    # also the higher-bitrate rendition, so prefer them before the generic best.
+    "/best[format_id^=h264][ext=mp4][vcodec!=none]"
     "/best[ext=mp4][vcodec!=none]"
     "/best[vcodec!=none]"
+)
+
+# Used to re-download when the first attempt lands a silent (video-only) file.
+_AUDIO_SAFE_FORMAT = (
+    "best[format_id^=h264][ext=mp4][vcodec!=none]"
+    "/bestvideo[ext=mp4]+bestaudio"
+    "/best[vcodec!=none][acodec!=none]"
 )
 
 
@@ -154,6 +166,53 @@ def get_profile_videos(tiktok_username: str,
     return videos
 
 
+def _has_audio_stream(file_path: Path) -> Optional[bool]:
+    """
+    True/False when ffprobe could inspect the file, None if ffprobe is unavailable.
+    TikTok metadata cannot be trusted: bytevc1 formats report acodec=aac yet download
+    with no audio track at all, which silently produces muted uploads.
+    """
+    probe = shutil.which("ffprobe")
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(file_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 - never block a download on probing
+        logger.warning("ffprobe failed on %s (%s) - skipping audio check",
+                       file_path.name, exc)
+        return None
+    return bool(out.stdout.strip())
+
+
+def _redownload_with_audio(video_url: str, video_id: str, output_dir: Path,
+                           base_opts: dict, silent_file: Path) -> Optional[Path]:
+    """Second attempt with a format known to carry audio. Returns the new file, or
+    None if the retry also produced a silent/missing file."""
+    silent_file.unlink(missing_ok=True)
+    opts = dict(base_opts)
+    opts["format"] = _AUDIO_SAFE_FORMAT
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(video_url, download=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[%s] Audio-safe re-download failed: %s", video_id, exc)
+        return None
+    for ext in ("mp4", "webm", "mkv"):
+        candidate = output_dir / f"{video_id}.{ext}"
+        if candidate.exists() and candidate.stat().st_size > 0:
+            if _has_audio_stream(candidate) is False:
+                logger.error("[%s] Re-download still has no audio", video_id)
+                return None
+            logger.info("[%s] Re-downloaded WITH audio: %s (%.1f MB)", video_id,
+                        candidate.name, candidate.stat().st_size / 1_048_576)
+            return candidate
+    return None
+
+
 def download_video(video_url: str, video_id: str, output_dir: Path) -> Optional[Path]:
     """
     Download one TikTok video without watermark.
@@ -205,6 +264,16 @@ def download_video(video_url: str, video_id: str, output_dir: Path) -> Optional[
         if candidate.exists() and candidate.stat().st_size > 0:
             logger.info("Downloaded: %s (%.1f MB)", candidate.name,
                         candidate.stat().st_size / 1_048_576)
+            if _has_audio_stream(candidate) is False:
+                logger.warning("[%s] Downloaded file has NO audio track - retrying "
+                               "with an audio-safe format", video_id)
+                recovered = _redownload_with_audio(video_url, video_id, output_dir,
+                                                   ydl_opts, candidate)
+                if recovered is not None:
+                    return recovered
+                logger.error("[%s] Could not obtain a version with audio - refusing "
+                             "to upload a silent video", video_id)
+                return None
             return candidate
 
     logger.error("Download reported success but no output file found for %s", video_id)
