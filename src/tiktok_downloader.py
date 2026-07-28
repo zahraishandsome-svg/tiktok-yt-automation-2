@@ -69,7 +69,9 @@ _AUDIO_SAFE_FORMAT = (
 
 _FETCH_RETRIES = 3
 _FETCH_RETRY_BASE_WAIT = 2   # seconds, doubles each attempt
-_PROFILE_BATCH = 50          # default fetch limit â€” covers most active channels
+_PROFILE_BATCH = 150         # default fetch limit — covers a whole profile, so the
+                             # unbounded fallback (which TikTok blocks on CI runners)
+                             # is rarely needed
 
 
 def get_profile_videos(tiktok_username: str,
