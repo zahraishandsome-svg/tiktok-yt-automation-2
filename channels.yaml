@@ -39,6 +39,8 @@ channels:
   - id: channel_4
     tiktok_username: "aiivannaa"
     youtube_channel_name: "aiivannaa"
+    # The Google account that owns this YouTube channel (supplied by the user).
+    owner_email: "usa942667@gmail.com"
     google_credentials_file: "credentials/channel_4_client_secret.json"
     oauth_token_file: "tokens/channel_4_token.json"
     videos_per_day: 2
