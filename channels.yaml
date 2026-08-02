@@ -1,63 +1,11 @@
-# TikTok → YouTube Channel Pairs
-# ────────────────────────────────────────────────────────────────────────────
-# Adding a new channel = add an entry here + run: python onboard_channel.py
-# No code changes needed.
+# DECOMMISSIONED 2026-08-02 - ch4 (@aiivannaa).
 #
-# Field reference:
-#   id                    Unique string ID. Used in DB, logs, and CLI flags.
-#   tiktok_username       TikTok @handle WITHOUT the @ symbol.
-#   youtube_channel_name  Display name (for logging only, not used in API calls).
-#   google_credentials_file  Path to client_secret.json from Google Cloud Console.
-#   oauth_token_file      Path to saved OAuth token (auto-created on first auth).
-#   videos_per_day        How many videos to upload per day (2 = 2 slots/day).
-#   description_footer    Text appended to every video description. Can be empty.
-#   default_tags          Tags added to every upload for this channel.
-#   youtube_category_id   YouTube category: 22=People & Blogs, 26=How-to & Style.
-#   enabled               Set to false to pause a channel without removing it.
-#   max_retry_days        Days to retry a failed download before giving up.
-#   shorts_max_seconds    Videos <= this duration (and vertical) upload as Shorts.
-#   min_upload_date       Optional YYYY-MM-DD. Ignore TikTok videos older than this date.
-#                         Useful for monetised channels that should only post recent content.
-#   min_backlog_for_slot1 Optional int. Slot 1 is skipped unless this many unuploaded
-#                         eligible videos exist. Use with min_upload_date to drop to 1/day
-#                         automatically once the backlog runs out.
-#   upload_mode           Controls what gets uploaded per slot (default: short_only).
-#                           short_only    Original 9:16 as Short (or regular if long/horizontal).
-#                                         Existing behaviour — all current channels use this.
-#                           dual          Upload Short + 4:3 blurred-fill longform from same source.
-#                                         Counts as 2 uploads per slot. Requires ffmpeg.
-#                           longform_only Upload ONLY the 4:3 blurred-fill version (no Short).
-#                                         Requires ffmpeg for vertical source videos.
-#                           split         Slot 1 uploads a fresh TikTok as Short (9:16).
-#                                         Slot 2 uploads a completely different TikTok as 4:3 longform.
-#                                         Cross-format exclusion: same video is never re-used across slots.
-#   longform_title_suffix Optional text appended to the title for longform (4:3) uploads.
-#                         E.g. " | Full Video". Only used in dual/longform_only/split modes.
-# ────────────────────────────────────────────────────────────────────────────
+# The YouTube channel was terminated by YouTube on 2026-07-31; every upload after
+# that returned 403 authenticatedUserAccountSuspended. Removed permanently at the
+# user's request: cron jobs deleted, workflows removed, database dropped.
+#
+# This repo is NOT reused - every new channel gets its own fresh repo and GCP
+# project. Full mirror backup kept at
+# C:/Users/Zahid/projects/_archive/tiktok-yt-automation-2.git
 
-channels:
-  - id: channel_4
-    tiktok_username: "aiivannaa"
-    youtube_channel_name: "aiivannaa"
-    # The Google account that owns this YouTube channel (supplied by the user).
-    owner_email: "usa942667@gmail.com"
-    google_credentials_file: "credentials/channel_4_client_secret.json"
-    oauth_token_file: "tokens/channel_4_token.json"
-    videos_per_day: 2
-    description_footer: ""
-    default_tags:
-      - aiivannaa
-      - viral
-      - trending
-    youtube_category_id: "22"
-    enabled: true
-    max_retry_days: 7
-    shorts_max_seconds: 180
-    upload_mode: popular_split
-    # No long videos. Slot 1 = newest unposted TikTok, Slot 2 = most-VIEWED unposted
-    # TikTok — both as Shorts. Switched from tiered_split 2026-07-22.
-    min_backlog_for_slot1: 1
-    max_download_candidates: 15
-    slot_publish_times_utc:
-      1: "17:00"   # PUBLIC at 7 PM CEST
-      2: "19:00"   # PUBLIC at 9 PM CEST
+channels: []
